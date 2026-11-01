@@ -602,6 +602,36 @@ public partial class ActiveStage: IDisposable
         }
     }
 
+    /// <exception cref="IronRdpException"></exception>
+    /// <returns>
+    /// A <c>ActiveStageOutputIterator</c> allocated on Rust side.
+    /// </returns>
+    public ActiveStageOutputIterator? EncodedMonitorLayout(DisplayMonitorLayout layout)
+    {
+        unsafe
+        {
+            if (layout == null) throw new ArgumentNullException(nameof(layout));
+            BorrowLease<Raw.ActiveStage>? selfLease = null;
+            BorrowLease<Raw.DisplayMonitorLayout>? layoutLease = null;
+            try
+            {
+                selfLease = _diplomatHandle.Lease(BorrowKind.Exclusive);
+                layoutLease = layout._diplomatHandle.Lease(BorrowKind.Shared);
+                var result = Raw.ActiveStage.EncodedMonitorLayout(selfLease!.Ptr, layoutLease!.Ptr);
+                if (!result.IsOk)
+                {
+                    throw new IronRdpException(new IronRdpError(result.Err));
+                }
+                return result.Ok == null ? null : new ActiveStageOutputIterator(result.Ok);
+            }
+            finally
+            {
+                selfLease?.Release();
+                layoutLease?.Release();
+            }
+        }
+    }
+
     public void SetFastpathProcessor(ushort ioChannelId, ushort userChannelId, uint shareId, bool enableServerPointer, bool pointerSoftwareRendering)
     {
         unsafe

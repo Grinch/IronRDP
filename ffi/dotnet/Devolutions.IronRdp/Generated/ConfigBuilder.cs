@@ -201,6 +201,26 @@ public partial class ConfigBuilder
         }
     }
 
+    public bool EnableAudioPlayback
+    {
+        set
+        {
+            unsafe
+            {
+                BorrowLease<Raw.ConfigBuilder>? selfLease = null;
+                try
+                {
+                    selfLease = _diplomatHandle.Lease(BorrowKind.Exclusive);
+                    Raw.ConfigBuilder.SetEnableAudioPlayback(selfLease!.Ptr, value);
+                }
+                finally
+                {
+                    selfLease?.Release();
+                }
+            }
+        }
+    }
+
     public bool EnableCredssp
     {
         set
@@ -500,6 +520,40 @@ public partial class ConfigBuilder
             {
                 selfLease = _diplomatHandle.Lease(BorrowKind.Exclusive);
                 Raw.ConfigBuilder.SetDesktopSize(selfLease!.Ptr, height, width);
+            }
+            finally
+            {
+                selfLease?.Release();
+            }
+        }
+    }
+
+    public void AddMonitor(int left, int top, int right, int bottom, bool isPrimary)
+    {
+        unsafe
+        {
+            BorrowLease<Raw.ConfigBuilder>? selfLease = null;
+            try
+            {
+                selfLease = _diplomatHandle.Lease(BorrowKind.Exclusive);
+                Raw.ConfigBuilder.AddMonitor(selfLease!.Ptr, left, top, right, bottom, isPrimary);
+            }
+            finally
+            {
+                selfLease?.Release();
+            }
+        }
+    }
+
+    public void ClearMonitors()
+    {
+        unsafe
+        {
+            BorrowLease<Raw.ConfigBuilder>? selfLease = null;
+            try
+            {
+                selfLease = _diplomatHandle.Lease(BorrowKind.Exclusive);
+                Raw.ConfigBuilder.ClearMonitors(selfLease!.Ptr);
             }
             finally
             {
