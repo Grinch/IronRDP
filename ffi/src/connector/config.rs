@@ -17,6 +17,81 @@ fn default_bitmap_config() -> Result<ironrdp::connector::BitmapConfig, Box<crate
     })
 }
 
+/// Client Monitor Data and the desktop size covering its monitors, from monitors given as `TS_MONITOR_DEF`s.
+///
+/// [MS-RDPBCGR] 2.2.1.3.6 "Client Monitor Data (TS_UD_CS_MONITOR)" allows at most 16 monitors, puts the upper-left
+/// corner of the primary monitor at (0, 0), and bounds the virtual desktop, the union of the monitors, to between
+/// 200 x 200 and 32766 x 32766 pixels.
+/// The desktop size sent in Client Core Data is the size of that union, as the native client sends it.
+///
+/// [MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/
+fn client_monitor_layout(
+    monitors: &[ironrdp::pdu::gcc::Monitor],
+) -> Result<(ironrdp::pdu::gcc::ClientMonitorData, ironrdp::connector::DesktopSize), &'static str> {
+    use ironrdp::pdu::gcc::{ClientMonitorData, MONITOR_COUNT_MAX, MonitorFlags};
+
+    const MIN_DESKTOP_EXTENT: i64 = 200;
+    const MAX_DESKTOP_EXTENT: i64 = 32_766;
+
+    if monitors.is_empty() {
+        return Err("no monitor was added");
+    }
+    if MONITOR_COUNT_MAX < monitors.len() {
+        return Err("more than 16 monitors were added");
+    }
+    if monitors
+        .iter()
+        .any(|monitor| monitor.right < monitor.left || monitor.bottom < monitor.top)
+    {
+        return Err("a monitor has its right edge left of its left edge or its bottom edge above its top edge");
+    }
+    let mut primary = monitors
+        .iter()
+        .filter(|monitor| monitor.flags.contains(MonitorFlags::PRIMARY));
+    let (Some(primary_monitor), None) = (primary.next(), primary.next()) else {
+        return Err("exactly one monitor must be primary");
+    };
+    if primary_monitor.left != 0 || primary_monitor.top != 0 {
+        return Err("the primary monitor must have its upper-left corner at (0, 0)");
+    }
+
+    let left = monitors
+        .iter()
+        .map(|monitor| i64::from(monitor.left))
+        .min()
+        .unwrap_or(0);
+    let top = monitors.iter().map(|monitor| i64::from(monitor.top)).min().unwrap_or(0);
+    let right = monitors
+        .iter()
+        .map(|monitor| i64::from(monitor.right))
+        .max()
+        .unwrap_or(0);
+    let bottom = monitors
+        .iter()
+        .map(|monitor| i64::from(monitor.bottom))
+        .max()
+        .unwrap_or(0);
+    // The bounds are inclusive.
+    let width = right - left + 1;
+    let height = bottom - top + 1;
+    if !((MIN_DESKTOP_EXTENT..=MAX_DESKTOP_EXTENT).contains(&width)
+        && (MIN_DESKTOP_EXTENT..=MAX_DESKTOP_EXTENT).contains(&height))
+    {
+        return Err("the monitors must span between 200 x 200 and 32766 x 32766 pixels");
+    }
+    let desktop_size = ironrdp::connector::DesktopSize {
+        width: u16::try_from(width).map_err(|_| "desktop width out of range")?,
+        height: u16::try_from(height).map_err(|_| "desktop height out of range")?,
+    };
+
+    Ok((
+        ClientMonitorData {
+            monitors: monitors.to_vec(),
+        },
+        desktop_size,
+    ))
+}
+
 // `ironrdp::pdu::gcc::KeyboardType` is a permissive newtype (MS-RDPBCGR's value table for this
 // field has grown across revisions), not a fieldless enum, so `diplomat::enum_convert` no longer
 // applies to it; this conversion is written by hand instead. It must live outside the
@@ -88,6 +163,7 @@ pub mod ffi {
         pub performance_flags: Option<ironrdp::pdu::rdp::client_info::PerformanceFlags>,
         pub timezone_info: Option<ironrdp::pdu::rdp::client_info::TimezoneInfo>,
         pub dvc_pipe_proxy: Option<DvcPipeProxyConfig>,
+        pub monitors: Vec<ironrdp::pdu::gcc::Monitor>,
     }
 
     pub enum KeyboardType {
@@ -225,7 +301,57 @@ pub mod ffi {
             self.dvc_pipe_proxy = Some(dvc_pipe_proxy.clone());
         }
 
+        /// Whether the server may send audio to play on this client; on by default.
+        ///
+        /// When off, the Client Info PDU sets `INFO_NOAUDIOPLAYBACK` and the server sends no audio.
+        /// Playing the audio also needs an RDPSND channel, such as `ClientConnector::with_static_channel_rdp_snd_native`.
+        #[diplomat::attr(auto, setter = "enable_audio_playback")]
+        pub fn set_enable_audio_playback(&mut self, enable_audio_playback: bool) {
+            self.no_audio_playback = Some(!enable_audio_playback);
+        }
+
+        /// Adds a monitor to the layout sent in Client Monitor Data ([MS-RDPBCGR] 2.2.1.3.6).
+        ///
+        /// The bounds are inclusive pixel coordinates, as in `TS_MONITOR_DEF`: a 1920 x 1080 primary monitor is
+        /// `(0, 0, 1919, 1079)`.
+        /// The primary monitor has its upper-left corner at (0, 0) and the others are placed relative to it, so
+        /// their coordinates may be negative.
+        ///
+        /// With monitors added, `build` checks the layout (1 to 16 monitors, exactly one primary at (0, 0), a union
+        /// between 200 x 200 and 32766 x 32766 pixels) and sends the size of the union as the desktop size, in place
+        /// of the one given to `set_desktop_size`.
+        /// The layout is sent only to a server that supports Extended Client Data Blocks (Windows 7 and Windows
+        /// Server 2008 R2 on); another server sees the desktop size alone.
+        ///
+        /// [MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/
+        pub fn add_monitor(&mut self, left: i32, top: i32, right: i32, bottom: i32, is_primary: bool) {
+            let flags = if is_primary {
+                ironrdp::pdu::gcc::MonitorFlags::PRIMARY
+            } else {
+                ironrdp::pdu::gcc::MonitorFlags::empty()
+            };
+            self.monitors.push(ironrdp::pdu::gcc::Monitor {
+                left,
+                top,
+                right,
+                bottom,
+                flags,
+            });
+        }
+
+        /// Removes the monitors added with `add_monitor`, so `build` sends no Client Monitor Data.
+        pub fn clear_monitors(&mut self) {
+            self.monitors.clear();
+        }
+
         pub fn build(&self) -> Result<Box<Config>, Box<IronRdpError>> {
+            let (monitor_layout, desktop_size) = if self.monitors.is_empty() {
+                (None, self.desktop_size.ok_or("desktop size not set")?)
+            } else {
+                let (layout, desktop_size) = super::client_monitor_layout(&self.monitors)?;
+                (Some(layout), desktop_size)
+            };
+
             let connector = ironrdp::connector::Config {
                 credentials: self.credentials.clone().ok_or("credentials not set")?,
                 domain: self.domain.clone(),
@@ -241,8 +367,8 @@ pub mod ffi {
                 connection_type: ironrdp::pdu::gcc::ConnectionType::Lan,
                 ime_file_name: self.ime_file_name.clone().unwrap_or_default(),
                 dig_product_id: self.dig_product_id.clone().unwrap_or_default(),
-                desktop_size: self.desktop_size.ok_or("desktop size not set")?,
-                monitor_layout: None,
+                desktop_size,
+                monitor_layout,
                 bitmap: Some(match &self.bitmap {
                     Some(bitmap) => bitmap.clone(),
                     None => super::default_bitmap_config()?,
@@ -362,16 +488,120 @@ impl From<PerformanceFlagsType> for PerformanceFlags {
 
 #[cfg(test)]
 mod tests {
+    use ironrdp::pdu::gcc::{Monitor, MonitorFlags};
     use ironrdp::pdu::rdp::capability_sets::CodecProperty;
 
-    #[test]
-    fn build_offers_remotefx_when_no_bitmap_config_is_set() {
+    fn complete_builder() -> Box<super::ffi::ConfigBuilder> {
         let mut builder = super::ffi::ConfigBuilder::new();
         builder.with_username_and_password("user", "password");
         builder.set_desktop_size(768, 1024);
         builder.set_client_name("client");
         builder.set_client_dir("C:\\");
         builder.set_performance_flags(&super::ffi::PerformanceFlags::new_default());
+        builder
+    }
+
+    fn monitor(left: i32, top: i32, right: i32, bottom: i32, primary: bool) -> Monitor {
+        Monitor {
+            left,
+            top,
+            right,
+            bottom,
+            flags: if primary {
+                MonitorFlags::PRIMARY
+            } else {
+                MonitorFlags::empty()
+            },
+        }
+    }
+
+    #[test]
+    fn build_sends_the_monitors_and_their_union_as_the_desktop_size() {
+        let mut builder = complete_builder();
+        builder.add_monitor(0, 0, 1919, 1079, true);
+        builder.add_monitor(-1280, 56, -1, 1079, false);
+
+        let Ok(config) = builder.build() else {
+            panic!("a valid monitor layout should build");
+        };
+        let Some(layout) = config.connector.monitor_layout else {
+            panic!("the config should carry the monitor layout");
+        };
+
+        assert_eq!(
+            layout.monitors,
+            vec![monitor(0, 0, 1919, 1079, true), monitor(-1280, 56, -1, 1079, false)]
+        );
+        assert_eq!(config.connector.desktop_size.width, 3200);
+        assert_eq!(config.connector.desktop_size.height, 1080);
+
+        let encoded = ironrdp::core::encode_vec(&layout).expect("the layout encodes");
+        #[rustfmt::skip]
+        let expected: [u8; 48] = [
+            0, 0, 0, 0, // flags
+            2, 0, 0, 0, // monitorCount
+            0, 0, 0, 0, 0, 0, 0, 0, 0x7F, 0x07, 0, 0, 0x37, 0x04, 0, 0, 1, 0, 0, 0, // primary, TS_MONITOR_PRIMARY
+            0x00, 0xFB, 0xFF, 0xFF, 0x38, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0x37, 0x04, 0, 0, 0, 0, 0, 0, // left of it
+        ];
+        assert_eq!(encoded, expected);
+    }
+
+    #[test]
+    fn build_without_monitors_sends_no_layout() {
+        let mut builder = complete_builder();
+        builder.add_monitor(0, 0, 1919, 1079, true);
+        builder.clear_monitors();
+
+        let Ok(config) = builder.build() else {
+            panic!("a builder with every required field should build");
+        };
+
+        assert!(config.connector.monitor_layout.is_none());
+        assert_eq!(config.connector.desktop_size.width, 1024);
+        assert_eq!(config.connector.desktop_size.height, 768);
+    }
+
+    #[test]
+    fn monitor_layouts_outside_the_specification_are_rejected() {
+        let primary = monitor(0, 0, 1919, 1079, true);
+        let secondary = monitor(1920, 0, 3839, 1079, false);
+
+        assert!(super::client_monitor_layout(&[]).is_err());
+        assert!(super::client_monitor_layout(core::slice::from_ref(&secondary)).is_err());
+        assert!(super::client_monitor_layout(&[primary.clone(), primary.clone()]).is_err());
+        assert!(super::client_monitor_layout(&[monitor(10, 0, 1919, 1079, true)]).is_err());
+        assert!(super::client_monitor_layout(&[monitor(0, 0, -1, 1079, true)]).is_err());
+        assert!(super::client_monitor_layout(&[monitor(0, 0, 198, 1079, true)]).is_err());
+        assert!(super::client_monitor_layout(&[primary.clone(), monitor(1920, 0, 32_766, 1079, false)]).is_err());
+
+        let mut seventeen = vec![monitor(0, 0, 199, 199, true)];
+        seventeen.extend((1..17).map(|index| monitor(index * 200, 0, index * 200 + 199, 199, false)));
+        assert!(super::client_monitor_layout(&seventeen).is_err());
+        assert!(super::client_monitor_layout(&seventeen[..16]).is_ok());
+
+        assert!(super::client_monitor_layout(&[monitor(0, 0, 199, 199, true)]).is_ok());
+        assert!(super::client_monitor_layout(&[primary.clone(), monitor(1920, 0, 32_765, 1079, false)]).is_ok());
+        assert!(super::client_monitor_layout(&[primary, secondary]).is_ok());
+    }
+
+    #[test]
+    fn audio_playback_setter_maps_to_the_no_audio_playback_flag() {
+        let mut builder = complete_builder();
+        let Ok(config) = builder.build() else {
+            panic!("a builder with every required field should build");
+        };
+        assert!(config.connector.enable_audio_playback);
+
+        builder.set_enable_audio_playback(false);
+        let Ok(config) = builder.build() else {
+            panic!("a builder with every required field should build");
+        };
+        assert!(!config.connector.enable_audio_playback);
+    }
+
+    #[test]
+    fn build_offers_remotefx_when_no_bitmap_config_is_set() {
+        let builder = complete_builder();
 
         let Ok(config) = builder.build() else {
             panic!("a builder with every required field should build");

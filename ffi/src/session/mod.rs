@@ -493,6 +493,27 @@ pub mod ffi {
                 .transpose()?)
         }
 
+        /// Encodes a request for the Display Control Virtual Channel to change to the monitors of `layout`.
+        ///
+        /// The layout must have exactly one primary monitor, no overlapping monitors, and every monitor touching
+        /// another ([MS-RDPEDISP] 2.2.2.2); monitors past the server's `max_num_monitors` are dropped.
+        /// Returns `None` while `display_control_state` is not `Ready`.
+        /// Fails when the layout breaks a rule above or covers more than the server's `max_monitor_area`; keep the
+        /// current layout then.
+        ///
+        /// [MS-RDPEDISP]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpedisp/
+        pub fn encoded_monitor_layout(
+            &mut self,
+            layout: &DisplayMonitorLayout,
+        ) -> Result<Option<Box<ActiveStageOutputIterator>>, Box<IronRdpError>> {
+            let layout = ironrdp::displaycontrol::pdu::DisplayControlMonitorLayout::new(&layout.0)?;
+            Ok(self.0.encode_monitor_layout(&layout).transpose()?.map(|frame| {
+                Box::new(ActiveStageOutputIterator(
+                    vec![ironrdp::session::ActiveStageOutput::ResponseFrame(frame)].into(),
+                ))
+            }))
+        }
+
         pub fn set_fastpath_processor(
             &mut self,
             io_channel_id: u16,
@@ -604,6 +625,54 @@ pub mod ffi {
         #[diplomat::attr(auto, getter = "max_monitor_area")]
         pub fn get_max_monitor_area(&self) -> u64 {
             self.0.max_monitor_area()
+        }
+    }
+
+    /// The monitors of a DISPLAYCONTROL_MONITOR_LAYOUT_PDU ([MS-RDPEDISP] 2.2.2.2), for
+    /// `ActiveStage::encoded_monitor_layout`.
+    ///
+    /// [MS-RDPEDISP]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpedisp/
+    #[diplomat::opaque_mut]
+    #[derive(Default)]
+    pub struct DisplayMonitorLayout(pub Vec<ironrdp::displaycontrol::pdu::MonitorLayoutEntry>);
+
+    impl DisplayMonitorLayout {
+        pub fn new() -> Box<DisplayMonitorLayout> {
+            Box::<DisplayMonitorLayout>::default()
+        }
+
+        /// Adds a monitor of `width` x `height` pixels with its upper-left corner at (`left`, `top`).
+        ///
+        /// Unlike `ConfigBuilder::add_monitor`, this takes a size rather than inclusive bounds, as
+        /// [MS-RDPEDISP] 2.2.2.2.1 does.
+        /// The width and height must be 200 to 8192 pixels, and an odd width is rounded down to an even one.
+        /// The primary monitor must be at (0, 0).
+        /// Fails when one of these does not hold; the layout as a whole is checked by `encoded_monitor_layout`.
+        ///
+        /// [MS-RDPEDISP]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpedisp/
+        pub fn add_monitor(
+            &mut self,
+            left: i32,
+            top: i32,
+            width: u32,
+            height: u32,
+            is_primary: bool,
+        ) -> Result<(), Box<IronRdpError>> {
+            use ironrdp::displaycontrol::pdu::MonitorLayoutEntry;
+
+            let entry = if is_primary {
+                MonitorLayoutEntry::new_primary(width, height)?
+            } else {
+                MonitorLayoutEntry::new_secondary(width, height)?
+            };
+            self.0.push(entry.with_position(left, top)?);
+            Ok(())
+        }
+
+        /// The number of monitors added.
+        #[diplomat::attr(auto, getter = "count")]
+        pub fn get_count(&self) -> usize {
+            self.0.len()
         }
     }
 
@@ -855,6 +924,19 @@ mod tests {
 
     use super::ffi::{ActiveStageOutput, ActiveStageOutputIterator, ActiveStageOutputType};
     use crate::error::ffi::IronRdpErrorKind;
+
+    #[test]
+    fn display_monitor_layout_rejects_monitors_the_channel_cannot_carry() {
+        let mut layout = super::ffi::DisplayMonitorLayout::new();
+
+        assert!(layout.add_monitor(10, 0, 1920, 1080, true).is_err());
+        assert!(layout.add_monitor(0, 0, 100, 1080, true).is_err());
+        assert!(layout.add_monitor(0, 0, 1920, 9000, true).is_err());
+        assert!(layout.add_monitor(0, 0, 1920, 1080, true).is_ok());
+        assert!(layout.add_monitor(-1280, 0, 1280, 1024, false).is_ok());
+        assert_eq!(layout.get_count(), 2);
+        assert!(ironrdp::displaycontrol::pdu::DisplayControlMonitorLayout::new(&layout.0).is_ok());
+    }
 
     #[test]
     fn active_stage_output_iterator_preserves_response_frame_order() {
