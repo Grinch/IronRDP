@@ -57,6 +57,123 @@ public partial class FormatDataResponse: IDisposable
         }
     }
 
+    /// <returns>
+    /// A <c>FormatDataResponse</c> allocated on Rust side.
+    /// </returns>
+    public static FormatDataResponse NewData(byte[] data)
+    {
+        unsafe
+        {
+            if (data == null) throw new ArgumentNullException(nameof(data));
+            fixed (byte* dataPtr = data)
+            {
+                Raw.FormatDataResponse* result = Raw.FormatDataResponse.NewData(new DiplomatSliceU8 { Ptr = dataPtr, Len = (nuint)data.Length });
+                return new FormatDataResponse(result);
+            }
+        }
+    }
+
+    /// <returns>
+    /// A <c>FormatDataResponse</c> allocated on Rust side.
+    /// </returns>
+    public static FormatDataResponse NewUnicodeText(string text)
+    {
+        unsafe
+        {
+            if (text == null) throw new ArgumentNullException(nameof(text));
+            byte[] textBytes = Diplomat.Utf8.Clone(text);
+            fixed (byte* textPtr = textBytes)
+            {
+                Raw.FormatDataResponse* result = Raw.FormatDataResponse.NewUnicodeText(new DiplomatSliceU8 { Ptr = textPtr, Len = (nuint)textBytes.Length });
+                return new FormatDataResponse(result);
+            }
+        }
+    }
+
+    /// <returns>
+    /// A <c>FormatDataResponse</c> allocated on Rust side.
+    /// </returns>
+    public static FormatDataResponse NewError()
+    {
+        unsafe
+        {
+            Raw.FormatDataResponse* result = Raw.FormatDataResponse.NewError();
+            return new FormatDataResponse(result);
+        }
+    }
+
+    /// <exception cref="IronRdpException"></exception>
+    public bool IsError()
+    {
+        unsafe
+        {
+            BorrowLease<Raw.FormatDataResponse>? selfLease = null;
+            try
+            {
+                selfLease = _diplomatHandle.Lease(BorrowKind.Shared);
+                var result = Raw.FormatDataResponse.IsError(selfLease!.Ptr);
+                if (!result.IsOk)
+                {
+                    throw new IronRdpException(new IronRdpError(result.Err));
+                }
+                return result.Ok;
+            }
+            finally
+            {
+                selfLease?.Release();
+            }
+        }
+    }
+
+    /// <exception cref="IronRdpException"></exception>
+    /// <returns>
+    /// A <c>VecU8</c> allocated on Rust side.
+    /// </returns>
+    public VecU8 Data()
+    {
+        unsafe
+        {
+            BorrowLease<Raw.FormatDataResponse>? selfLease = null;
+            try
+            {
+                selfLease = _diplomatHandle.Lease(BorrowKind.Shared);
+                var result = Raw.FormatDataResponse.Data(selfLease!.Ptr);
+                if (!result.IsOk)
+                {
+                    throw new IronRdpException(new IronRdpError(result.Err));
+                }
+                return new VecU8(result.Ok);
+            }
+            finally
+            {
+                selfLease?.Release();
+            }
+        }
+    }
+
+    /// <exception cref="IronRdpException"></exception>
+    public nuint DataSize()
+    {
+        unsafe
+        {
+            BorrowLease<Raw.FormatDataResponse>? selfLease = null;
+            try
+            {
+                selfLease = _diplomatHandle.Lease(BorrowKind.Shared);
+                var result = Raw.FormatDataResponse.DataSize(selfLease!.Ptr);
+                if (!result.IsOk)
+                {
+                    throw new IronRdpException(new IronRdpError(result.Err));
+                }
+                return result.Ok;
+            }
+            finally
+            {
+                selfLease?.Release();
+            }
+        }
+    }
+
     private void Cleanup()
     {
         unsafe

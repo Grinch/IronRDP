@@ -9,6 +9,12 @@ namespace Devolutions.IronRdp.Raw;
 internal partial struct ClipboardFormatId
 {
 
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClipboardFormatId_new", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern ClipboardFormatId* New(uint id);
+
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClipboardFormatId_get_value", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern uint GetValue(ClipboardFormatId* handle);
+
     [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClipboardFormatId_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static unsafe extern void Destroy(ClipboardFormatId* handle);
 }

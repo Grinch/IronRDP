@@ -57,6 +57,94 @@ public partial class ClipboardFormatIterator
         }
     }
 
+    /// <returns>
+    /// A <c>ClipboardFormatIterator</c> allocated on Rust side.
+    /// </returns>
+    public static ClipboardFormatIterator New()
+    {
+        unsafe
+        {
+            Raw.ClipboardFormatIterator* result = Raw.ClipboardFormatIterator.New();
+            return new ClipboardFormatIterator(result);
+        }
+    }
+
+    public void Push(ClipboardFormat format)
+    {
+        unsafe
+        {
+            if (format == null) throw new ArgumentNullException(nameof(format));
+            BorrowLease<Raw.ClipboardFormatIterator>? selfLease = null;
+            BorrowLease<Raw.ClipboardFormat>? formatLease = null;
+            try
+            {
+                selfLease = _diplomatHandle.Lease(BorrowKind.Exclusive);
+                formatLease = format._diplomatHandle.Lease(BorrowKind.Shared);
+                Raw.ClipboardFormatIterator.Push(selfLease!.Ptr, formatLease!.Ptr);
+            }
+            finally
+            {
+                selfLease?.Release();
+                formatLease?.Release();
+            }
+        }
+    }
+
+    public nuint Len()
+    {
+        unsafe
+        {
+            BorrowLease<Raw.ClipboardFormatIterator>? selfLease = null;
+            try
+            {
+                selfLease = _diplomatHandle.Lease(BorrowKind.Shared);
+                return Raw.ClipboardFormatIterator.Len(selfLease!.Ptr);
+            }
+            finally
+            {
+                selfLease?.Release();
+            }
+        }
+    }
+
+    public bool IsEmpty()
+    {
+        unsafe
+        {
+            BorrowLease<Raw.ClipboardFormatIterator>? selfLease = null;
+            try
+            {
+                selfLease = _diplomatHandle.Lease(BorrowKind.Shared);
+                return Raw.ClipboardFormatIterator.IsEmpty(selfLease!.Ptr);
+            }
+            finally
+            {
+                selfLease?.Release();
+            }
+        }
+    }
+
+    /// <returns>
+    /// A <c>ClipboardFormat</c> allocated on Rust side.
+    /// </returns>
+    public ClipboardFormat? Get(nuint index)
+    {
+        unsafe
+        {
+            BorrowLease<Raw.ClipboardFormatIterator>? selfLease = null;
+            try
+            {
+                selfLease = _diplomatHandle.Lease(BorrowKind.Shared);
+                Raw.ClipboardFormat* result = Raw.ClipboardFormatIterator.Get(selfLease!.Ptr, index);
+                return result == null ? null : new ClipboardFormat(result);
+            }
+            finally
+            {
+                selfLease?.Release();
+            }
+        }
+    }
+
     private void Cleanup()
     {
         unsafe
