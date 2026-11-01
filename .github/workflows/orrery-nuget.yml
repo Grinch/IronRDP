@@ -1,0 +1,338 @@
+# Builds the Devolutions.IronRdp package Orrery (https://github.com/InspireNXE/Orrery) uses and publishes it as the
+# release nuget-<version> of this fork, for Orrery's build/Get-IronRdp.ps1 to download. Run by hand with the commit to
+# build and the package version. It's IronRDP's own nuget-publish.yml trimmed to the six platforms Orrery ships (no
+# Android, iOS or macOS universal library) and to the net8.0 package. Nothing goes to nuget.org.
+#
+# Only this file differs from upstream on master, so the workflow can be run; the commit it builds is checked out on
+# its own and needn't contain it.
+#
+# Supply chain: every action is pinned by commit, the Chocolatey packages by version, and Rust by the commit's own
+# rust-toolchain.toml.
+
+name: Orrery NuGet package
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: The full SHA of the commit to build (pushed to this fork)
+        required: true
+        type: string
+      version:
+        description: The package version, Orrery's IronRdpVersion (for example 2026.10.29-orrery.3)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: orrery-nuget-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  # The SDK Orrery's lock files were made with.
+  DOTNET_SDK_VERSION: 10.0.403
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+
+jobs:
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-24.04
+    outputs:
+      crate-version: ${{ steps.check.outputs.crate-version }}
+
+    # The native library's own version (Cargo.toml, which ends up in the Windows DLL's version resource) takes only the
+    # package version's numeric part, as IronRDP's workflow does. A release is never replaced: everyone whose
+    # ironrdp-package.json names it would get a SHA-256 mismatch, so a new package needs a new version.
+    steps:
+      - name: Check the inputs
+        id: check
+        env:
+          COMMIT: ${{ inputs.commit }}
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ($Env:COMMIT -cnotmatch '^[0-9a-f]{40}$') { throw "commit '$Env:COMMIT' isn't a full, lower-case commit SHA." }
+          if ($Env:VERSION -notmatch '^(\d+\.\d+\.\d+)(-[0-9A-Za-z.-]+)?$') { throw "version '$Env:VERSION' isn't a package version." }
+          $CrateVersion = $Matches[1]
+
+          gh api "repos/$Env:GITHUB_REPOSITORY/commits/$Env:COMMIT" --jq .sha | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "$Env:COMMIT isn't in $Env:GITHUB_REPOSITORY. Push it first." }
+
+          $Tag = "nuget-$Env:VERSION"
+          $Tags = @(gh api "repos/$Env:GITHUB_REPOSITORY/git/matching-refs/tags/$Tag" --jq '.[].ref')
+          if ($LASTEXITCODE -ne 0) { throw 'Listing the tags failed.' }
+          if ($Tags -contains "refs/tags/$Tag") { throw "The tag $Tag already exists. Use a new version." }
+
+          Write-Host "Devolutions.IronRdp $Env:VERSION from $Env:GITHUB_REPOSITORY@$Env:COMMIT"
+          "crate-version=$CrateVersion" >> $Env:GITHUB_OUTPUT
+        shell: pwsh
+
+  native:
+    name: Native (${{ matrix.os }}-${{ matrix.arch }})
+    needs: [preflight]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [win, osx, linux]
+        arch: [x64, arm64]
+        include:
+          - os: win
+            runner: windows-2022
+          - os: osx
+            runner: macos-14
+          - os: linux
+            runner: ubuntu-22.04
+
+    steps:
+      - name: Check out ${{ inputs.commit }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+
+      - name: Configure macOS deployment target
+        if: ${{ matrix.os == 'osx' }}
+        run: Write-Output "MACOSX_DEPLOYMENT_TARGET=10.10" | Out-File -FilePath $Env:GITHUB_ENV -Encoding utf8 -Append
+        shell: pwsh
+
+      - name: Update runner
+        if: ${{ matrix.os == 'linux' }}
+        run: sudo apt update
+
+      # nuget-publish.yml also installs the VsDevShell module from the PowerShell Gallery here; the build doesn't use
+      # it, so it's left out.
+      - name: Install dependencies for rustls
+        if: ${{ runner.os == 'Windows' }}
+        run: |
+          # Chocolatey checks each package against the checksum its repository publishes.
+          choco install ninja --version 1.13.2 -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'choco install ninja failed.' }
+          choco install nasm --version 3.2.0 -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'choco install nasm failed.' }
+
+          # We need to add the NASM binary folder to the PATH manually.
+          # We don't need to do that for ninja.
+          Write-Output "PATH=$Env:PATH;$Env:ProgramFiles\NASM" >> $Env:GITHUB_ENV
+
+          # libclang / LLVM is a requirement for AWS LC.
+          # https://aws.github.io/aws-lc-rs/requirements/windows.html#libclang--llvm
+          $VSINSTALLDIR = $(vswhere.exe -latest -requires Microsoft.VisualStudio.Component.VC.Llvm.Clang -property installationPath)
+          Write-Output "LIBCLANG_PATH=$VSINSTALLDIR\VC\Tools\Llvm\x64\bin" >> $Env:GITHUB_ENV
+        shell: pwsh
+
+      # Checks the download against the checksum file in the pinned action.
+      - name: Setup LLVM
+        if: ${{ matrix.os == 'linux' }}
+        uses: Devolutions/actions-public/setup-llvm@683202ddb90523af00d81a98bcc1278e4bd1a951 # v1 (branch head, 2026-10-14)
+        with:
+          version: "18.1.8"
+
+      # Checks the sysroots against the checksum file in the pinned action.
+      - name: Setup CBake
+        if: ${{ matrix.os == 'linux' }}
+        uses: Devolutions/actions-public/setup-cbake@683202ddb90523af00d81a98bcc1278e4bd1a951 # v1 (branch head, 2026-10-14)
+        with:
+          cargo_env_scripts: true
+
+      # Crates and build output. A new commit starts from the previous commit's cache.
+      - name: Cache cargo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ matrix.runner }}-${{ matrix.os }}-${{ matrix.arch }}-${{ inputs.commit }}
+          restore-keys: cargo-${{ matrix.runner }}-${{ matrix.os }}-${{ matrix.arch }}-
+
+      - name: Build native lib (${{matrix.os}}-${{matrix.arch}})
+        env:
+          CRATE_VERSION: ${{ needs.preflight.outputs.crate-version }}
+        run: |
+          $DotNetOs = '${{matrix.os}}'
+          $DotNetArch = '${{matrix.arch}}'
+          $DotNetRid = '${{matrix.os}}-${{matrix.arch}}'
+          $RustArch = @{'x64'='x86_64';'arm64'='aarch64'}[$DotNetArch]
+          $RustPlatform = @{'win'='pc-windows-msvc';'osx'='apple-darwin';'linux'='unknown-linux-gnu'}[$DotNetOs]
+          $LibPrefix = @{'win'='';'osx'='lib';'linux'='lib'}[$DotNetOs]
+          $LibSuffix = @{'win'='.dll';'osx'='.dylib';'linux'='.so'}[$DotNetOs]
+          $RustTarget = "$RustArch-$RustPlatform"
+
+          # The toolchain the commit pins in rust-toolchain.toml. rustup checks what it downloads against the release's
+          # published SHA-256 hashes.
+          $Toolchain = (Select-String -Path rust-toolchain.toml -Pattern '^channel\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          rustup toolchain install $Toolchain --target $RustTarget
+          if ($LASTEXITCODE -ne 0) { throw "rustup toolchain install $Toolchain failed." }
+
+          if ($DotNetOs -eq 'win') {
+            $Env:RUSTFLAGS="-C target-feature=+crt-static"
+          }
+
+          $CargoToml = Get-Content .\ffi\Cargo.toml
+          $CargoToml = $CargoToml | ForEach-Object {
+            if ($_.StartsWith("version =")) { "version = `"$Env:CRATE_VERSION`"" } else { $_ }
+          }
+          Set-Content -Path .\ffi\Cargo.toml -Value $CargoToml
+
+          if ($DotNetOs -eq 'linux') {
+            $LinuxArch = @{'x64'='amd64';'arm64'='arm64'}[$DotNetArch]
+            $Env:SYSROOT_NAME = "ubuntu-20.04-$LinuxArch"
+            . "$HOME/.cargo/cbake/${RustTarget}-enter.ps1"
+            $Env:AWS_LC_SYS_CMAKE_BUILDER="true"
+          }
+
+          $CargoParams = @(
+              "build",
+              "-p", "ffi",
+              "--profile", "production-ffi",
+              "--target", "$RustTarget"
+          )
+
+          & cargo $CargoParams
+          if ($LASTEXITCODE -ne 0) { throw "cargo build failed for $RustTarget." }
+
+          $OutputLibraryName = "${LibPrefix}ironrdp$LibSuffix"
+          $RenamedLibraryName = "${LibPrefix}DevolutionsIronRdp$LibSuffix"
+          $OutputLibrary = Join-Path "target" $RustTarget 'production-ffi' $OutputLibraryName
+          $OutputPath = Join-Path "dependencies" "runtimes" $DotNetRid "native"
+          New-Item -ItemType Directory -Path $OutputPath | Out-Null
+          Copy-Item $OutputLibrary $(Join-Path $OutputPath $RenamedLibraryName)
+        shell: pwsh
+
+      - name: Upload native components
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ironrdp-${{matrix.os}}-${{matrix.arch}}
+          path: dependencies/runtimes/${{matrix.os}}-${{matrix.arch}}
+          if-no-files-found: error
+
+  package:
+    name: Package
+    needs: [native]
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ inputs.version }}
+
+    steps:
+      - name: Check out ${{ inputs.commit }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+
+      - name: Set up .NET ${{ env.DOTNET_SDK_VERSION }}
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: ${{ env.DOTNET_SDK_VERSION }}
+
+      - name: Download native components
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: ironrdp-*
+          path: dependencies/runtimes
+
+      - name: Rename dependencies
+        working-directory: dependencies/runtimes
+        run: |
+          $(Get-Item ".\ironrdp-*") | ForEach-Object { Rename-Item $_ $_.Name.Replace("ironrdp-", "") }
+          Get-ChildItem * -Recurse
+        shell: pwsh
+
+      # Every native library in the project is packed only if it exists, so leaving out Android, iOS and the macOS
+      # universal library needs nothing else. The check below makes sure the six Orrery ships are in.
+      - name: Build Devolutions.IronRdp (managed)
+        run: |
+          [IO.File]::WriteAllText((Join-Path (Get-Location) 'global.json'), '{ "sdk": { "version": "' + $Env:DOTNET_SDK_VERSION + '", "rollForward": "disable" } }')
+          # Built the way nuget-publish.yml builds it: the project packs on build (GeneratePackageOnBuild).
+          $Output = Join-Path $Env:RUNNER_TEMP 'ironrdp-nuget'
+          dotnet build ./ffi/dotnet/Devolutions.IronRdp/Devolutions.IronRdp.csproj -c Release -p:Version=$Env:VERSION -p:PackageOutputPath=$Output
+          if ($LASTEXITCODE -ne 0) { throw 'dotnet build failed.' }
+        shell: pwsh
+
+      - name: Check the package
+        run: |
+          $Package = Join-Path $Env:RUNNER_TEMP "ironrdp-nuget/Devolutions.IronRdp.$Env:VERSION.nupkg"
+          if (-not (Test-Path $Package)) { throw "$Package is missing." }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $Zip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $Package))
+          try { $Entries = $Zip.Entries.FullName } finally { $Zip.Dispose() }
+          $Expected = @(
+            'lib/net8.0/Devolutions.IronRdp.dll'
+            'runtimes/win-x64/native/DevolutionsIronRdp.dll'
+            'runtimes/win-arm64/native/DevolutionsIronRdp.dll'
+            'runtimes/linux-x64/native/libDevolutionsIronRdp.so'
+            'runtimes/linux-arm64/native/libDevolutionsIronRdp.so'
+            'runtimes/osx-x64/native/libDevolutionsIronRdp.dylib'
+            'runtimes/osx-arm64/native/libDevolutionsIronRdp.dylib'
+          )
+          $Missing = $Expected | Where-Object { $Entries -notcontains $_ }
+          if ($Missing) { throw "$Package lacks $($Missing -join ', ')." }
+          $Entries | ForEach-Object { Write-Host "   $_" }
+          Write-Host "SHA-256 $((Get-FileHash $Package -Algorithm SHA256).Hash)"
+        shell: pwsh
+
+      - name: Upload the package
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ironrdp-nupkg
+          path: ${{ runner.temp }}/ironrdp-nuget/*.nupkg
+          if-no-files-found: error
+
+  # The one job that may write to the repository. It tags the built commit, so the release points at its source.
+  publish:
+    name: Publish
+    needs: [package]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      COMMIT: ${{ inputs.commit }}
+      VERSION: ${{ inputs.version }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Download Devolutions.IronRdp
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ironrdp-nupkg
+          path: ironrdp-nuget
+
+      - name: Create the release
+        run: |
+          $Tag = "nuget-$Env:VERSION"
+          $Name = "Devolutions.IronRdp.$Env:VERSION.nupkg"
+          $Package = Join-Path 'ironrdp-nuget' $Name
+          if (-not (Test-Path $Package)) { throw "$Package is missing." }
+          $Sha256 = (Get-FileHash $Package -Algorithm SHA256).Hash.ToLowerInvariant()
+
+          $Notes = "Devolutions.IronRdp $Env:VERSION for Orrery, built from $Env:COMMIT by " +
+            "$Env:GITHUB_SERVER_URL/$Env:GITHUB_REPOSITORY/actions/runs/$Env:GITHUB_RUN_ID. SHA-256 $Sha256. " +
+            "Orrery's build/Get-IronRdp.ps1 downloads it. Not on nuget.org."
+          gh release create $Tag $Package --repo $Env:GITHUB_REPOSITORY --target $Env:COMMIT `
+            --title "Devolutions.IronRdp $Env:VERSION" --notes $Notes
+          if ($LASTEXITCODE -ne 0) { throw 'gh release create failed.' }
+
+          # Check what was uploaded, the way Get-IronRdp.ps1 will.
+          $Check = Join-Path $Env:RUNNER_TEMP 'ironrdp-release'
+          gh release download $Tag --repo $Env:GITHUB_REPOSITORY --pattern $Name --dir $Check
+          if ($LASTEXITCODE -ne 0) { throw 'gh release download failed.' }
+          $Uploaded = (Get-FileHash (Join-Path $Check $Name) -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($Uploaded -ne $Sha256) { throw "The release asset has SHA-256 $Uploaded, not $Sha256." }
+
+          $Json = [ordered]@{
+            version = $Env:VERSION
+            repository = $Env:GITHUB_REPOSITORY
+            commit = $Env:COMMIT
+            url = "$Env:GITHUB_SERVER_URL/$Env:GITHUB_REPOSITORY/releases/download/$Tag/$Name"
+            sha256 = $Sha256
+          } | ConvertTo-Json
+          Write-Host "Published $Name, SHA-256 $Sha256. Set these in Orrery's build/ironrdp-package.json, then refresh its lock files (docs/packaging.md):"
+          Write-Host $Json
+          @("Published ``$Name``, SHA-256 ``$Sha256``. Set these in Orrery's ``build/ironrdp-package.json``, then refresh its lock files (docs/packaging.md):",
+            '', '```json', $Json, '```') >> $Env:GITHUB_STEP_SUMMARY
+        shell: pwsh
