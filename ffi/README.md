@@ -38,6 +38,8 @@ A server that does not support Extended Client Data Blocks sees the desktop size
 ## Audio playback
 
 `connector.WithStaticChannelRdpSndNative()` plays the server's audio on the default output device of Windows, macOS and Linux, through CPAL.
+It also offers the `AUDIO_PLAYBACK_DVC` and `AUDIO_PLAYBACK_LOSSY_DVC` dynamic channels, which Windows 8 and later prefer, as mstsc does.
+On the legacy bitmap path a resize is a Deactivation-Reactivation Sequence, after which Windows 11 may stop sending audio for the rest of the session, on either channel; mstsc avoids it by resizing through the graphics pipeline ([MS-RDPEGFX]), which this library does not offer yet.
 `WithStaticChannelRdpSnd()` attaches the channel with a backend that discards the audio; attach one or the other.
 `ConfigBuilder.EnableAudioPlayback` (on by default) tells the server whether to send audio at all.
 The native library needs the `rdpsnd-native` feature, on by default; on Linux, building it needs the ALSA development files (`libasound2-dev`) and `pkg-config`.
@@ -119,3 +121,4 @@ File transfer is not negotiated, so only formats whose data fits in one response
 [Diplomat]: https://github.com/rust-diplomat/diplomat
 [MS-RDPEDISP]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpedisp
 [MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr
+[MS-RDPEGFX]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx
