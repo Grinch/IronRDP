@@ -24,6 +24,7 @@ ironrdp = { path = "../crates/ironrdp", features = ["session", "connector", "dvc
 ironrdp-cliprdr-native.path = "../crates/ironrdp-cliprdr-native"
 ironrdp-dvc-pipe-proxy.path = "../crates/ironrdp-dvc-pipe-proxy"
 ironrdp-core = { path = "../crates/ironrdp-core", features = ["alloc"] }
+ironrdp-egfx.path = "../crates/ironrdp-egfx"
 ironrdp-vmconnect = { path = "../crates/ironrdp-vmconnect" }
 ironrdp-rdcleanpath.path = "../crates/ironrdp-rdcleanpath"
 sspi = { version = "0.23", features = ["network_client"] }
@@ -36,6 +37,10 @@ anyhow = "1.0"
 ironrdp-rdpdr-native.path = "../crates/ironrdp-rdpdr-native"
 # Opus is left out: its bundled build needs CMake. The server then picks PCM, ADPCM or G.711 (or AAC on Windows).
 ironrdp-rdpsnd-native = { path = "../crates/ironrdp-rdpsnd-native", default-features = false, features = ["aac"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+# Decodes the graphics pipeline's H.264 with the decoder Windows ships (`ClientConnector::with_dynamic_channel_graphics_pipeline`).
+ironrdp-egfx-native.path = "../crates/ironrdp-egfx-native"
 
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3.0"

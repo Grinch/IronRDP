@@ -1759,6 +1759,8 @@ dependencies = [
  "ironrdp-cliprdr-native",
  "ironrdp-core 0.3.1",
  "ironrdp-dvc-pipe-proxy",
+ "ironrdp-egfx",
+ "ironrdp-egfx-native",
  "ironrdp-rdcleanpath",
  "ironrdp-rdpdr-native",
  "ironrdp-rdpsnd-native",

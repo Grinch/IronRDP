@@ -375,6 +375,29 @@ public partial class ClientConnector
     }
 
     /// <exception cref="IronRdpException"></exception>
+    public void WithDynamicChannelGraphicsPipeline(bool h264)
+    {
+        unsafe
+        {
+            BorrowLease<Raw.ClientConnector>? selfLease = null;
+            try
+            {
+                selfLease = _diplomatHandle.Lease(BorrowKind.Exclusive);
+                var result = Raw.ClientConnector.WithDynamicChannelGraphicsPipeline(selfLease!.Ptr, h264);
+                if (!result.IsOk)
+                {
+                    throw new IronRdpException(new IronRdpError(result.Err));
+                }
+                return;
+            }
+            finally
+            {
+                selfLease?.Release();
+            }
+        }
+    }
+
+    /// <exception cref="IronRdpException"></exception>
     public void WithDynamicChannelRdpei(ushort maxTouchContacts, bool showTouchVisuals)
     {
         unsafe

@@ -1,6 +1,7 @@
 pub mod activation;
 pub mod config;
 pub mod drives;
+mod graphics_pipeline;
 pub mod result;
 pub mod state;
 
@@ -438,6 +439,28 @@ pub mod ffi {
                 info!(display_control_capabilities = ?c, "DisplayControl capabilities received");
                 Ok(Vec::new())
             }))
+        }
+
+        /// Attaches the graphics pipeline dynamic channel ([MS-RDPEGFX]) and tells the server the client supports it
+        /// (`RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL` in Client Core Data, [MS-RDPBCGR] 2.2.1.3.2).
+        ///
+        /// A server that takes it draws the desktop through the pipeline, which `ActiveStage.process` composites into
+        /// the `DecodedImage`, and resizes the desktop with `RDPGFX_RESET_GRAPHICS_PDU` instead of a
+        /// Deactivation-Reactivation Sequence: the image then takes the new size in place, and the next
+        /// `GraphicsUpdate` covers all of it. A server that does not keep drawing with bitmap updates.
+        ///
+        /// `h264` offers the AVC420 and AVC444 capability sets when the platform has an H.264 decoder: Media
+        /// Foundation's on Windows, started in the background so connecting does not wait for it. Without one, or
+        /// with `h264` false, only the capability sets without AVC are offered.
+        ///
+        /// [MS-RDPEGFX]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx/
+        /// [MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/
+        pub fn with_dynamic_channel_graphics_pipeline(&mut self, h264: bool) -> Result<(), Box<IronRdpError>> {
+            let Some(connector) = &mut self.0 else {
+                return Err(ValueConsumedError::for_item("connector").into());
+            };
+            connector.config.support_dyn_vc_gfx_protocol = true;
+            self.with_dvc(super::graphics_pipeline::client(h264))
         }
 
         /// Attaches the MS-RDPEI dynamic channel so the client can send touch frames.

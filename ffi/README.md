@@ -27,6 +27,14 @@ Read `ActiveStage.DisplayControlState` after each `Process` call: it moves from 
 `ActiveStage.DisplayControlCapabilities` exposes the server's monitor count and area limits once `Ready`.
 `ActiveStage.EncodedMonitorLayout(layout)` sends several monitors at once: fill a `DisplayMonitorLayout` with `AddMonitor(left, top, width, height, isPrimary)`, one primary at (0, 0), the monitors touching and not overlapping.
 
+## Graphics pipeline
+
+`connector.WithDynamicChannelGraphicsPipeline(h264)` attaches the graphics pipeline ([MS-RDPEGFX]) and announces it in Client Core Data (`RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL`).
+A server that takes it draws through the pipeline, and `ActiveStage.Process` composites its surfaces into the `DecodedImage` and reports `GraphicsUpdate`s as before.
+A resize then comes as `RDPGFX_RESET_GRAPHICS_PDU` instead of `DeactivateAll`: the `DecodedImage` takes the new size in place, so compare its `Width` and `Height` after each `Process` call, and the next `GraphicsUpdate` covers all of it.
+A server that does not take it, or a client that does not attach it, stays on bitmap updates and `DeactivateAll`, so handle both.
+`h264` also offers the AVC420 and AVC444 capability sets on Windows, decoded by Media Foundation's H.264 decoder, which starts in the background and is waited for when the channel opens; if it does not start, or elsewhere, only the sets without AVC are offered, and the server sends RemoteFX Progressive, ClearCodec, Planar or uncompressed surfaces.
+
 ## Multiple monitors at connection time
 
 `ConfigBuilder.AddMonitor(left, top, right, bottom, isPrimary)` describes one monitor of Client Monitor Data ([MS-RDPBCGR] 2.2.1.3.6), with inclusive bounds: a 1920 x 1080 primary is `(0, 0, 1919, 1079)`.
@@ -39,7 +47,7 @@ A server that does not support Extended Client Data Blocks sees the desktop size
 
 `connector.WithStaticChannelRdpSndNative()` plays the server's audio on the default output device of Windows, macOS and Linux, through CPAL.
 It also offers the `AUDIO_PLAYBACK_DVC` and `AUDIO_PLAYBACK_LOSSY_DVC` dynamic channels, which Windows 8 and later prefer, as mstsc does.
-On the legacy bitmap path a resize is a Deactivation-Reactivation Sequence, after which Windows 11 may stop sending audio for the rest of the session, on either channel; mstsc avoids it by resizing through the graphics pipeline ([MS-RDPEGFX]), which this library does not offer yet.
+On the legacy bitmap path a resize is a Deactivation-Reactivation Sequence, after which Windows 11 may stop sending audio for the rest of the session, on either channel; attach the graphics pipeline (below), which resizes without one, as mstsc does.
 `WithStaticChannelRdpSnd()` attaches the channel with a backend that discards the audio; attach one or the other.
 `ConfigBuilder.EnableAudioPlayback` (on by default) tells the server whether to send audio at all.
 The native library needs the `rdpsnd-native` feature, on by default; on Linux, building it needs the ALSA development files (`libasound2-dev`) and `pkg-config`.

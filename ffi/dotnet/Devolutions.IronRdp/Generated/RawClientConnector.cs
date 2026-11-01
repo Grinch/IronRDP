@@ -42,6 +42,9 @@ internal partial struct ClientConnector
     [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClientConnector_with_dynamic_channel_display_control", CallingConvention = CallingConvention.Cdecl)]
     internal static unsafe extern DiplomatResultVoidIronRdpError WithDynamicChannelDisplayControl(ClientConnector* handle);
 
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClientConnector_with_dynamic_channel_graphics_pipeline", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern DiplomatResultVoidIronRdpError WithDynamicChannelGraphicsPipeline(ClientConnector* handle, [MarshalAs(UnmanagedType.U1)] bool h264);
+
     [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClientConnector_with_dynamic_channel_rdpei", CallingConvention = CallingConvention.Cdecl)]
     internal static unsafe extern DiplomatResultVoidIronRdpError WithDynamicChannelRdpei(ClientConnector* handle, ushort maxTouchContacts, [MarshalAs(UnmanagedType.U1)] bool showTouchVisuals);
 
