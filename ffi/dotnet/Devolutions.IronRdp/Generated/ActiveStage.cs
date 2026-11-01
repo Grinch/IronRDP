@@ -606,6 +606,32 @@ public partial class ActiveStage: IDisposable
     /// <returns>
     /// A <c>ActiveStageOutputIterator</c> allocated on Rust side.
     /// </returns>
+    public ActiveStageOutputIterator? EncodedResizeWithScale(uint width, uint height, uint scaleFactor)
+    {
+        unsafe
+        {
+            BorrowLease<Raw.ActiveStage>? selfLease = null;
+            try
+            {
+                selfLease = _diplomatHandle.Lease(BorrowKind.Exclusive);
+                var result = Raw.ActiveStage.EncodedResizeWithScale(selfLease!.Ptr, width, height, scaleFactor);
+                if (!result.IsOk)
+                {
+                    throw new IronRdpException(new IronRdpError(result.Err));
+                }
+                return result.Ok == null ? null : new ActiveStageOutputIterator(result.Ok);
+            }
+            finally
+            {
+                selfLease?.Release();
+            }
+        }
+    }
+
+    /// <exception cref="IronRdpException"></exception>
+    /// <returns>
+    /// A <c>ActiveStageOutputIterator</c> allocated on Rust side.
+    /// </returns>
     public ActiveStageOutputIterator? EncodedMonitorLayout(DisplayMonitorLayout layout)
     {
         unsafe

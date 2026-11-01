@@ -75,6 +75,9 @@ internal partial struct ConfigBuilder
     [DllImport(DiplomatNativeLib.Name, EntryPoint = "ConfigBuilder_set_enable_audio_playback", CallingConvention = CallingConvention.Cdecl)]
     internal static unsafe extern void SetEnableAudioPlayback(ConfigBuilder* handle, [MarshalAs(UnmanagedType.U1)] bool enableAudioPlayback);
 
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ConfigBuilder_set_desktop_scale_factor", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern void SetDesktopScaleFactor(ConfigBuilder* handle, uint scaleFactor);
+
     [DllImport(DiplomatNativeLib.Name, EntryPoint = "ConfigBuilder_add_monitor", CallingConvention = CallingConvention.Cdecl)]
     internal static unsafe extern void AddMonitor(ConfigBuilder* handle, int left, int top, int right, int bottom, [MarshalAs(UnmanagedType.U1)] bool isPrimary);
 

@@ -66,6 +66,9 @@ internal partial struct ActiveStage
     [DllImport(DiplomatNativeLib.Name, EntryPoint = "ActiveStage_encoded_resize", CallingConvention = CallingConvention.Cdecl)]
     internal static unsafe extern DiplomatResultActiveStageOutputIteratorIronRdpError EncodedResize(ActiveStage* handle, uint width, uint height);
 
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ActiveStage_encoded_resize_with_scale", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern DiplomatResultActiveStageOutputIteratorIronRdpError EncodedResizeWithScale(ActiveStage* handle, uint width, uint height, uint scaleFactor);
+
     [DllImport(DiplomatNativeLib.Name, EntryPoint = "ActiveStage_encoded_monitor_layout", CallingConvention = CallingConvention.Cdecl)]
     internal static unsafe extern DiplomatResultActiveStageOutputIteratorIronRdpError EncodedMonitorLayout(ActiveStage* handle, DisplayMonitorLayout* layout);
 

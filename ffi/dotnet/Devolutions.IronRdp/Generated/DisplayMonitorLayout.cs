@@ -112,6 +112,29 @@ public partial class DisplayMonitorLayout
         }
     }
 
+    /// <exception cref="IronRdpException"></exception>
+    public void AddMonitorWithScale(int left, int top, uint width, uint height, bool isPrimary, uint scaleFactor)
+    {
+        unsafe
+        {
+            BorrowLease<Raw.DisplayMonitorLayout>? selfLease = null;
+            try
+            {
+                selfLease = _diplomatHandle.Lease(BorrowKind.Exclusive);
+                var result = Raw.DisplayMonitorLayout.AddMonitorWithScale(selfLease!.Ptr, left, top, width, height, isPrimary, scaleFactor);
+                if (!result.IsOk)
+                {
+                    throw new IronRdpException(new IronRdpError(result.Err));
+                }
+                return;
+            }
+            finally
+            {
+                selfLease?.Release();
+            }
+        }
+    }
+
     private void Cleanup()
     {
         unsafe

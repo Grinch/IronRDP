@@ -127,6 +127,26 @@ public partial class ConfigBuilder
         }
     }
 
+    public uint DesktopScaleFactor
+    {
+        set
+        {
+            unsafe
+            {
+                BorrowLease<Raw.ConfigBuilder>? selfLease = null;
+                try
+                {
+                    selfLease = _diplomatHandle.Lease(BorrowKind.Exclusive);
+                    Raw.ConfigBuilder.SetDesktopScaleFactor(selfLease!.Ptr, value);
+                }
+                finally
+                {
+                    selfLease?.Release();
+                }
+            }
+        }
+    }
+
     public string DigProductId
     {
         set

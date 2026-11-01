@@ -25,6 +25,35 @@ fn default_bitmap_config() -> Result<ironrdp::connector::BitmapConfig, Box<crate
 /// The desktop size sent in Client Core Data is the size of that union, as the native client sends it.
 ///
 /// [MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/
+/// Client Monitor Extended Data ([MS-RDPBCGR] 2.2.1.3.9) giving each monitor the same scale and no physical size,
+/// which the server then ignores.
+///
+/// [MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/
+fn monitor_extended_layout(
+    monitors: &[ironrdp::pdu::gcc::Monitor],
+    desktop_scale_factor: u32,
+    device_scale_factor: u32,
+) -> ironrdp::pdu::gcc::ClientMonitorExtendedData {
+    use ironrdp::pdu::gcc::{ClientMonitorExtendedData, ExtendedMonitorInfo, MonitorOrientation};
+
+    ClientMonitorExtendedData {
+        extended_monitors_info: monitors
+            .iter()
+            .map(|monitor| ExtendedMonitorInfo {
+                physical_width: 0,
+                physical_height: 0,
+                orientation: if monitor.bottom - monitor.top > monitor.right - monitor.left {
+                    MonitorOrientation::Portrait
+                } else {
+                    MonitorOrientation::Landscape
+                },
+                desktop_scale_factor,
+                device_scale_factor,
+            })
+            .collect(),
+    }
+}
+
 fn client_monitor_layout(
     monitors: &[ironrdp::pdu::gcc::Monitor],
 ) -> Result<(ironrdp::pdu::gcc::ClientMonitorData, ironrdp::connector::DesktopSize), &'static str> {
@@ -164,6 +193,7 @@ pub mod ffi {
         pub timezone_info: Option<ironrdp::pdu::rdp::client_info::TimezoneInfo>,
         pub dvc_pipe_proxy: Option<DvcPipeProxyConfig>,
         pub monitors: Vec<ironrdp::pdu::gcc::Monitor>,
+        pub desktop_scale_factor: Option<u32>,
     }
 
     pub enum KeyboardType {
@@ -310,6 +340,18 @@ pub mod ffi {
             self.no_audio_playback = Some(!enable_audio_playback);
         }
 
+        /// Asks the server to scale its desktop by `scale_factor` percent, 100 to 500, as the local display does.
+        ///
+        /// It goes in Client Core Data (`desktopScaleFactor`, with the matching `deviceScaleFactor` of 100, 140 or 180,
+        /// [MS-RDPBCGR] 2.2.1.3.2) and, for each monitor added with `add_monitor`, in Client Monitor Extended Data
+        /// (2.2.1.3.9). Without it, the server keeps its own scale. `build` fails for a factor out of range.
+        ///
+        /// [MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/
+        #[diplomat::attr(auto, setter = "desktop_scale_factor")]
+        pub fn set_desktop_scale_factor(&mut self, scale_factor: u32) {
+            self.desktop_scale_factor = Some(scale_factor);
+        }
+
         /// Adds a monitor to the layout sent in Client Monitor Data ([MS-RDPBCGR] 2.2.1.3.6).
         ///
         /// The bounds are inclusive pixel coordinates, as in `TS_MONITOR_DEF`: a 1920 x 1080 primary monitor is
@@ -347,6 +389,17 @@ pub mod ffi {
         pub fn build(&self) -> Result<Box<Config>, Box<IronRdpError>> {
             // Checked before the desktop size, so the first missing field is reported first.
             let credentials = self.credentials.clone().ok_or("credentials not set")?;
+            let scale = match self.desktop_scale_factor {
+                Some(desktop @ 100..=500) => Some((
+                    desktop,
+                    ironrdp::displaycontrol::pdu::DeviceScaleFactor::from_desktop_scale_factor(desktop).value(),
+                )),
+                Some(_) => return Err("the desktop scale factor must be 100 to 500 percent".into()),
+                None => None,
+            };
+            let monitor_extended_layout = scale
+                .filter(|_| !self.monitors.is_empty())
+                .map(|(desktop, device)| super::monitor_extended_layout(&self.monitors, desktop, device));
             let (monitor_layout, desktop_size) = if self.monitors.is_empty() {
                 (None, self.desktop_size.ok_or("desktop size not set")?)
             } else {
@@ -409,11 +462,11 @@ pub mod ffi {
                 support_dyn_vc_gfx_protocol: false,
                 rdp_version: ironrdp::pdu::gcc::RdpVersion::V5_PLUS,
                 performance_flags: self.performance_flags.ok_or("performance flag is missing")?,
-                desktop_scale_factor: 0,
+                desktop_scale_factor: scale.map_or(0, |(desktop, _)| desktop),
                 desktop_physical_size: None,
                 desktop_orientation: None,
-                device_scale_factor: None,
-                monitor_extended_layout: None,
+                device_scale_factor: scale.map(|(_, device)| device),
+                monitor_extended_layout,
                 relative_mouse_input: false,
                 hardware_id: None,
                 license_cache: None,

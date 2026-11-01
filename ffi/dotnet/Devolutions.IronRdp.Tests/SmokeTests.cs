@@ -576,6 +576,54 @@ internal static class SmokeTests
             True(resize!.Next() is { EnumType: ActiveStageOutputType.ResponseFrame }, "resize is a response frame");
         });
 
+        // oracle: spec MS-RDPBCGR §2.2.1.3.2 (desktopScaleFactor then deviceScaleFactor, which is 140 for 140 to 179 percent)
+        // and §2.2.1.3.9.1 (each monitor's attributes end with the same two; sent to a server whose RDP_NEG_RSP sets
+        // EXTENDED_CLIENT_DATA_SUPPORTED, §2.2.1.2.1)
+        yield return ("a desktop scale factor goes in the core data and with each monitor", () =>
+        {
+            var single = TlsConfigBuilder();
+            single.DesktopScaleFactor = 150;
+            Equal(1, CountOf(ConnectInitial(single.Build()), ScaleFactors150), "scale factors in the core data alone");
+
+            var monitors = TlsConfigBuilder();
+            monitors.DesktopScaleFactor = 150;
+            monitors.AddMonitor(0, 0, 1919, 1079, true);
+            monitors.AddMonitor(1920, 0, 3839, 1079, false);
+            Equal(3, CountOf(ConnectInitial(monitors.Build(), extendedClientData: true), ScaleFactors150), "scale factors in the core data and two monitors");
+
+            Equal(0, CountOf(ConnectInitial(TlsConfig()), ScaleFactors150), "no scale factors unless asked");
+        });
+
+        // oracle: spec MS-RDPBCGR §2.2.1.3.2 (desktopScaleFactor is 100 to 500 percent)
+        yield return ("a desktop scale factor out of range fails the build", () =>
+        {
+            var builder = TlsConfigBuilder();
+            builder.DesktopScaleFactor = 50;
+            var error = Throws<IronRdpException>(() => builder.Build());
+            True(error.Message.Contains("scale factor"), $"error message: {error.Message}");
+        });
+
+        // oracle: spec MS-RDPEDISP §2.2.2.2.1 (DISPLAYCONTROL_MONITOR_LAYOUT ends with DesktopScaleFactor and
+        // DeviceScaleFactor, 100, 140 or 180)
+        yield return ("a resize and a monitor layout carry the scale factor", () =>
+        {
+            var (stage, image) = ConnectedStage(8, 4, displayControl: true);
+            ProcessFrame(stage, image, DrdynvcDisplayControlCreateRequest);
+            ProcessFrame(stage, image, DisplayControlCapsPdu);
+
+            var resize = stage.EncodedResizeWithScale(1024, 768, 150)!.Next()!;
+            Equal(ActiveStageOutputType.ResponseFrame, resize.EnumType, "resize output");
+            Equal(1, CountOf(ToArray(resize.ResponseFrame), ScaleFactors150), "scale factors in the resize");
+
+            var layout = DisplayMonitorLayout.New();
+            layout.AddMonitorWithScale(0, 0, 1920, 1080, true, 150);
+            layout.AddMonitorWithScale(1920, 0, 1920, 1080, false, 150);
+            var spread = stage.EncodedMonitorLayout(layout)!.Next()!;
+            Equal(2, CountOf(ToArray(spread.ResponseFrame), ScaleFactors150), "scale factors in the layout");
+
+            Throws<IronRdpException>(() => DisplayMonitorLayout.New().AddMonitorWithScale(0, 0, 1920, 1080, true, 50));
+        });
+
         // oracle: spec MS-RDPBCGR §2.2.1.3.2 (earlyCapabilityFlags RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL = 0x0100 in Client Core Data)
         yield return ("the graphics pipeline is announced in the client core data", () =>
         {
@@ -1652,6 +1700,45 @@ internal static class SmokeTests
     private static byte[] GraphicsServerPdu(params byte[][] pdus) =>
         DrdynvcServerPdu(new byte[] { 0x30, 0x01, 0xe0, 0x04 }.Concat(pdus.SelectMany(pdu => pdu)).ToArray());
 
+    // A desktop scale factor of 150 percent followed by its device scale factor, 140, as two little-endian u32s.
+    private static readonly byte[] ScaleFactors150 = { 0x96, 0x00, 0x00, 0x00, 0x8c, 0x00, 0x00, 0x00 };
+
+    // The MCS Connect Initial the connector sends after the TLS upgrade, which carries the GCC client data blocks.
+    // extendedClientData answers as a server supporting Extended Client Data Blocks (RDP_NEG_RSP flags 0x01).
+    private static byte[] ConnectInitial(Config config, bool extendedClientData = false)
+    {
+        var confirm = TpktX224ConfirmSelectingTls.ToArray();
+        if (extendedClientData)
+        {
+            confirm[12] = 0x01;
+        }
+
+        var connector = ClientConnector.New(config, "127.0.0.1:33890");
+        var buf = WriteBuf.New();
+        connector.StepNoInput(buf);
+        buf.Clear();
+        connector.Step(confirm, buf);
+        connector.MarkSecurityUpgradeAsDone();
+        buf.Clear();
+        var bytes = new byte[(int)connector.StepNoInput(buf).Size.Get()];
+        buf.ReadIntoBuf(bytes);
+        return bytes;
+    }
+
+    private static int CountOf(byte[] haystack, byte[] needle)
+    {
+        int count = 0;
+        for (int i = 0; i + needle.Length <= haystack.Length; i++)
+        {
+            if (haystack.AsSpan(i, needle.Length).SequenceEqual(needle))
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
     private static int IndexOf(byte[] haystack, byte[] needle)
     {
         for (int i = 0; i + needle.Length <= haystack.Length; i++)
@@ -1931,7 +2018,9 @@ internal static class SmokeTests
         throw new InvalidOperationException("SetSurfaceBits produced no GraphicsUpdate");
     }
 
-    private static Config TlsConfig()
+    private static Config TlsConfig() => TlsConfigBuilder().Build();
+
+    private static ConfigBuilder TlsConfigBuilder()
     {
         var builder = ConfigBuilder.New();
         builder.WithUsernameAndPassword("user", "password");
@@ -1941,7 +2030,7 @@ internal static class SmokeTests
         builder.EnableTls = true;
         builder.EnableCredssp = false;
         builder.PerformanceFlags = PerformanceFlags.NewDefault();
-        return builder.Build();
+        return builder;
     }
 
     private sealed class ChunkedReadStream : Stream

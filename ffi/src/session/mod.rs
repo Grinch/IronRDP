@@ -493,6 +493,29 @@ pub mod ffi {
                 .transpose()?)
         }
 
+        /// Encodes a resize request like `encoded_resize`, asking the server to scale its desktop by `scale_factor`
+        /// percent, clamped to 100 to 500, with the matching device scale factor of 100, 140 or 180
+        /// ([MS-RDPEDISP] 2.2.2.2.1).
+        ///
+        /// [MS-RDPEDISP]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpedisp/
+        pub fn encoded_resize_with_scale(
+            &mut self,
+            width: u32,
+            height: u32,
+            scale_factor: u32,
+        ) -> Result<Option<Box<ActiveStageOutputIterator>>, Box<IronRdpError>> {
+            let (width, height) = ironrdp::displaycontrol::pdu::MonitorLayoutEntry::adjust_display_size(width, height);
+            Ok(self
+                .0
+                .encode_resize(width, height, Some(scale_factor), None)
+                .transpose()?
+                .map(|frame| {
+                    Box::new(ActiveStageOutputIterator(
+                        vec![ironrdp::session::ActiveStageOutput::ResponseFrame(frame)].into(),
+                    ))
+                }))
+        }
+
         /// Encodes a request for the Display Control Virtual Channel to change to the monitors of `layout`.
         ///
         /// The layout must have exactly one primary monitor, no overlapping monitors, and every monitor touching
@@ -666,6 +689,36 @@ pub mod ffi {
                 MonitorLayoutEntry::new_secondary(width, height)?
             };
             self.0.push(entry.with_position(left, top)?);
+            Ok(())
+        }
+
+        /// Adds a monitor like `add_monitor`, scaled by `scale_factor` percent, 100 to 500, with the matching device
+        /// scale factor of 100, 140 or 180 ([MS-RDPEDISP] 2.2.2.2.1).
+        /// Fails as `add_monitor` does, or for a factor out of range.
+        ///
+        /// [MS-RDPEDISP]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpedisp/
+        pub fn add_monitor_with_scale(
+            &mut self,
+            left: i32,
+            top: i32,
+            width: u32,
+            height: u32,
+            is_primary: bool,
+            scale_factor: u32,
+        ) -> Result<(), Box<IronRdpError>> {
+            use ironrdp::displaycontrol::pdu::{DeviceScaleFactor, MonitorLayoutEntry};
+
+            let entry = if is_primary {
+                MonitorLayoutEntry::new_primary(width, height)?
+            } else {
+                MonitorLayoutEntry::new_secondary(width, height)?
+            };
+            self.0.push(
+                entry
+                    .with_position(left, top)?
+                    .with_desktop_scale_factor(scale_factor)?
+                    .with_device_scale_factor(DeviceScaleFactor::from_desktop_scale_factor(scale_factor)),
+            );
             Ok(())
         }
 

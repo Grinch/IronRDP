@@ -35,6 +35,13 @@ A resize then comes as `RDPGFX_RESET_GRAPHICS_PDU` instead of `DeactivateAll`: t
 A server that does not take it, or a client that does not attach it, stays on bitmap updates and `DeactivateAll`, so handle both.
 `h264` also offers the AVC420 and AVC444 capability sets on Windows, decoded by Media Foundation's H.264 decoder, which starts in the background and is waited for when the channel opens; if it does not start, or elsewhere, only the sets without AVC are offered, and the server sends RemoteFX Progressive, ClearCodec, Planar or uncompressed surfaces.
 
+## Display scaling
+
+Give the desktop size in the local display's physical pixels and its scale in percent, so the server draws at full resolution and scales its own UI, as mstsc does.
+At connection time, `ConfigBuilder.DesktopScaleFactor` (100 to 500) goes in Client Core Data and, for monitors added with `AddMonitor`, in Client Monitor Extended Data; `Build()` rejects a factor out of range.
+On a resize, `ActiveStage.EncodedResizeWithScale(width, height, scale)` and `DisplayMonitorLayout.AddMonitorWithScale(...)` send it through Display Control.
+The device scale factor (100, 140 or 180) is derived from it.
+
 ## Multiple monitors at connection time
 
 `ConfigBuilder.AddMonitor(left, top, right, bottom, isPrimary)` describes one monitor of Client Monitor Data ([MS-RDPBCGR] 2.2.1.3.6), with inclusive bounds: a 1920 x 1080 primary is `(0, 0, 1919, 1079)`.

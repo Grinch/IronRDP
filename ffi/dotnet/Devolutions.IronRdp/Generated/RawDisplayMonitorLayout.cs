@@ -15,6 +15,9 @@ internal partial struct DisplayMonitorLayout
     [DllImport(DiplomatNativeLib.Name, EntryPoint = "DisplayMonitorLayout_add_monitor", CallingConvention = CallingConvention.Cdecl)]
     internal static unsafe extern DiplomatResultVoidIronRdpError AddMonitor(DisplayMonitorLayout* handle, int left, int top, uint width, uint height, [MarshalAs(UnmanagedType.U1)] bool isPrimary);
 
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "DisplayMonitorLayout_add_monitor_with_scale", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern DiplomatResultVoidIronRdpError AddMonitorWithScale(DisplayMonitorLayout* handle, int left, int top, uint width, uint height, [MarshalAs(UnmanagedType.U1)] bool isPrimary, uint scaleFactor);
+
     [DllImport(DiplomatNativeLib.Name, EntryPoint = "DisplayMonitorLayout_get_count", CallingConvention = CallingConvention.Cdecl)]
     internal static unsafe extern nuint GetCount(DisplayMonitorLayout* handle);
 
