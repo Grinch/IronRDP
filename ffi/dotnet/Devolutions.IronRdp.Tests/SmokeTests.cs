@@ -420,6 +420,91 @@ internal static class SmokeTests
             True(error.Message.Contains("credentials not set"), $"error message: {error.Message}");
         });
 
+        // oracle: ffi/README.md "Multiple monitors at connection time"
+        yield return ("config builder checks the monitor layout", () =>
+        {
+            var builder = ConfigBuilder.New();
+            builder.WithUsernameAndPassword("user", "password");
+            builder.ClientName = "smoke-tests";
+            builder.ClientDir = "C:\\Windows\\System32\\mstscax.dll";
+            builder.PerformanceFlags = PerformanceFlags.NewDefault();
+
+            builder.AddMonitor(0, 0, 1919, 1079, true);
+            builder.AddMonitor(-1280, 0, -1, 1023, false);
+            builder.Build();
+
+            builder.AddMonitor(1920, 0, 3839, 1079, true);
+            var error = Throws<IronRdpException>(() => builder.Build());
+            True(error.Message.Contains("exactly one monitor must be primary"), $"error message: {error.Message}");
+
+            builder.ClearMonitors();
+            error = Throws<IronRdpException>(() => builder.Build());
+            True(error.Message.Contains("desktop size not set"), $"error message: {error.Message}");
+        });
+
+        // oracle: ffi/README.md "Dynamic resize"; MS-RDPEDISP 2.2.2.2.1 bounds monitor sizes to 200..8192
+        yield return ("display monitor layout rejects sizes the channel cannot carry", () =>
+        {
+            var layout = DisplayMonitorLayout.New();
+            Throws<IronRdpException>(() => layout.AddMonitor(0, 0, 100, 1080, true));
+            Throws<IronRdpException>(() => layout.AddMonitor(10, 0, 1920, 1080, true));
+            layout.AddMonitor(0, 0, 1920, 1080, true);
+            layout.AddMonitor(1920, 0, 1280, 1024, false);
+            Equal(2, (int)layout.Count, "monitor count");
+        });
+
+        // oracle: spec MS-RDPBCGR 2.2.1.1 (routingToken replaces the cookie and ends with CR LF)
+        yield return ("load balance info becomes the X.224 routing token", () =>
+        {
+            var connector = ClientConnector.New(TlsConfig(), "127.0.0.1:33890");
+            Throws<IronRdpException>(() => connector.WithLoadBalanceInfo(new byte[] { 0x01, 0x02 }));
+            Throws<IronRdpException>(() => connector.WithLoadBalanceInfo(Array.Empty<byte>()));
+            connector.WithLoadBalanceInfo(System.Text.Encoding.ASCII.GetBytes("Cookie: msts=3640655040.15629.0000\r\n"));
+
+            var buf = WriteBuf.New();
+            connector.StepNoInput(buf);
+            var filled = buf.Filled;
+            var request = new byte[(int)filled.Size];
+            filled.Fill(request);
+            var text = System.Text.Encoding.ASCII.GetString(request);
+            True(text.Contains("Cookie: msts=3640655040.15629.0000\r\n"), $"request: {Convert.ToHexString(request)}");
+            True(!text.Contains("mstshash"), "the routing token replaces the user name cookie");
+        });
+
+        // oracle: ffi/README.md "Console session and Connection Broker redirection", "Audio playback", "Drive redirection"
+        yield return ("connector attaches redirection, audio and drive settings before connecting", () =>
+        {
+            var connector = ClientConnector.New(TlsConfig(), "127.0.0.1:33890");
+            connector.WithRedirectionSupport();
+            connector.WithAdminSession();
+            connector.WithRedirectedSessionId(5);
+            connector.WithRedirectionPasswordCookie(new byte[] { 1, 2, 3 });
+            Throws<IronRdpException>(() => connector.WithRedirectionPasswordCookie(Array.Empty<byte>()));
+            connector.WithStaticChannelRdpSndNative();
+
+            var drives = DriveRedirection.New();
+            Throws<IronRdpException>(() => drives.AddDrive("Relative", "relative\\folder"));
+            Throws<IronRdpException>(() => drives.AddDrive("", Path.GetTempPath()));
+            drives.AddDrive("Temp", Path.GetTempPath());
+            Equal(1, (int)drives.Count, "drive count");
+            if (DriveRedirection.SupportsMultipleDrives())
+            {
+                Throws<IronRdpException>(() => drives.AddDrive("TEMP", Path.GetTempPath()));
+            }
+            else
+            {
+                Throws<IronRdpException>(() => drives.AddDrive("Other", Path.GetTempPath()));
+            }
+
+            Throws<IronRdpException>(() => connector.WithStaticChannelRdpdrDrives("smoke-tests", DriveRedirection.New()));
+            connector.WithStaticChannelRdpdrDrives("smoke-tests", drives);
+            var error = Throws<IronRdpException>(() => connector.WithStaticChannelRdpdr("smoke-tests", 0));
+            True(error.Message.Contains("already attached"), $"error message: {error.Message}");
+
+            var buf = WriteBuf.New();
+            True(connector.StepNoInput(buf).Size.IsSome(), "the connector still starts the connection");
+        });
+
         yield return ("connector sends an X.224 request and accepts the confirm", () =>
         {
             var config = TlsConfig();

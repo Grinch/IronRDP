@@ -25,6 +25,42 @@ The server opens it and sends its capabilities some time after the connection is
 Read `ActiveStage.DisplayControlState` after each `Process` call: it moves from `Pending` to `Ready` when the capabilities arrive, which is when to send the first resize.
 `Unavailable` means the channel was not requested.
 `ActiveStage.DisplayControlCapabilities` exposes the server's monitor count and area limits once `Ready`.
+`ActiveStage.EncodedMonitorLayout(layout)` sends several monitors at once: fill a `DisplayMonitorLayout` with `AddMonitor(left, top, width, height, isPrimary)`, one primary at (0, 0), the monitors touching and not overlapping.
+
+## Multiple monitors at connection time
+
+`ConfigBuilder.AddMonitor(left, top, right, bottom, isPrimary)` describes one monitor of Client Monitor Data ([MS-RDPBCGR] 2.2.1.3.6), with inclusive bounds: a 1920 x 1080 primary is `(0, 0, 1919, 1079)`.
+The primary is at (0, 0), and the others are placed relative to it, at negative coordinates when left of or above it.
+`Build()` rejects a layout with no or several primaries, a primary away from (0, 0), more than 16 monitors, or a union outside 200 x 200 to 32766 x 32766 pixels.
+It sends the size of that union as the desktop size, in place of the one given to `SetDesktopSize`.
+A server that does not support Extended Client Data Blocks sees the desktop size alone.
+
+## Audio playback
+
+`connector.WithStaticChannelRdpSndNative()` plays the server's audio on the default output device of Windows, macOS and Linux, through CPAL.
+`WithStaticChannelRdpSnd()` attaches the channel with a backend that discards the audio; attach one or the other.
+`ConfigBuilder.EnableAudioPlayback` (on by default) tells the server whether to send audio at all.
+The native library needs the `rdpsnd-native` feature, on by default; on Linux, building it needs the ALSA development files (`libasound2-dev`) and `pkg-config`.
+Without the feature, `WithStaticChannelRdpSndNative` throws `IronRdpException` with the `WrongOS` kind.
+Opus is not offered, so the server sends PCM, ADPCM or G.711, or AAC to a Windows client.
+
+## Drive redirection
+
+Fill a `DriveRedirection` with `AddDrive(name, path)` and attach it with `connector.WithStaticChannelRdpdrDrives(computerName, drives)`; the session shows each folder as `\\tsclient\<name>`.
+A connection has one RDPDR channel, so `WithStaticChannelRdpdrDrives` and `WithStaticChannelRdpdr` (smart card) are alternatives, and the second one called throws.
+Windows shares every drive added; Linux and macOS share one folder, and `AddDrive` throws on a second one there (`DriveRedirection.SupportsMultipleDrives()`).
+Call `ActiveStage.PollRdpdrDeferred()` on a timer, as for smart cards, since some file operations complete later.
+
+## Console session and Connection Broker redirection
+
+- `connector.WithAdminSession()` asks for the console session, as `mstsc /admin` does: Client Cluster Data ([MS-RDPBCGR] 2.2.1.3.5) names session 0 with `REDIRECTED_SESSIONID_FIELD_VALID`.
+- `connector.WithRedirectionSupport()` tells the server the client follows Server Redirection PDUs; a Connection Broker redirects only such clients.
+  The other two cluster methods advertise it as well.
+- A redirected connection ends in the `Redirected` state with a `ServerRedirection`.
+  Connect again to its target with `WithLoadBalanceInfo` given the bytes of `redirection.LoadBalanceInfo`, `WithRedirectedSessionId(redirection.SessionId)` and, when `Password` is not empty, `WithRedirectionPasswordCookie` given its bytes.
+  Both properties are `VecU8`s, which `Utils.VecU8ToByte` copies into a `byte[]`; dispose them afterwards.
+- `WithLoadBalanceInfo` drops one trailing CR LF and throws unless the rest is 1 to 238 bytes of printable ASCII, the only routing token the connector can send.
+- The cluster methods compose: a redirected session ID takes precedence over the session 0 of `WithAdminSession`.
 
 ## Touch and pen input (MS-RDPEI)
 
@@ -81,3 +117,4 @@ File transfer is not negotiated, so only formats whose data fits in one response
 
 [Diplomat]: https://github.com/rust-diplomat/diplomat
 [MS-RDPEDISP]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpedisp
+[MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr
