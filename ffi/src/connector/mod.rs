@@ -296,8 +296,11 @@ pub mod ffi {
         ///
         /// A connection has one RDPDR channel, so this and `with_static_channel_rdpdr` are alternatives: the
         /// second one called fails.
-        /// Fails as well when `drives` is empty, when a folder can no longer be opened, and on platforms other than
-        /// Windows, Linux and macOS (`WrongOS`).
+        /// With `drives` empty the channel is attached with no device: Windows servers start audio playback
+        /// (RDPSND) only once a client has the RDPDR channel, so a client playing audio without sharing folders
+        /// calls this with an empty `DriveRedirection`.
+        /// Fails as well when a folder can no longer be opened, and on platforms other than Windows, Linux and
+        /// macOS (`WrongOS`).
         ///
         /// Windows shares every drive, with the access of the user running the client.
         /// Linux and macOS share one folder (see `DriveRedirection::supports_multiple_drives`); server paths never
@@ -313,7 +316,14 @@ pub mod ffi {
         ) -> Result<(), Box<IronRdpError>> {
             self.ensure_no_rdpdr()?;
             if drives.0.is_empty() {
-                return Err("no drive to redirect".into());
+                let Some(connector) = self.0.take() else {
+                    return Err(ValueConsumedError::for_item("connector").into());
+                };
+                self.0 = Some(connector.with_static_channel(ironrdp::rdpdr::Rdpdr::new(
+                    Box::new(ironrdp::rdpdr::NoopRdpdrBackend),
+                    computer_name.to_owned(),
+                )));
+                return Ok(());
             }
 
             #[cfg(windows)]

@@ -471,6 +471,16 @@ internal static class SmokeTests
             True(!text.Contains("mstshash"), "the routing token replaces the user name cookie");
         });
 
+        // oracle: ffi/README.md "Audio playback"
+        yield return ("an empty drive list attaches the RDPDR channel with no device, for audio", () =>
+        {
+            var connector = ClientConnector.New(TlsConfig(), "127.0.0.1:33890");
+            connector.WithStaticChannelRdpSndNative();
+            connector.WithStaticChannelRdpdrDrives("smoke-tests", DriveRedirection.New());
+            var error = Throws<IronRdpException>(() => connector.WithStaticChannelRdpdr("smoke-tests", 0));
+            True(error.Message.Contains("already attached"), $"error message: {error.Message}");
+        });
+
         // oracle: ffi/README.md "Console session and Connection Broker redirection", "Audio playback", "Drive redirection"
         yield return ("connector attaches redirection, audio and drive settings before connecting", () =>
         {
@@ -496,7 +506,6 @@ internal static class SmokeTests
                 Throws<IronRdpException>(() => drives.AddDrive("Other", Path.GetTempPath()));
             }
 
-            Throws<IronRdpException>(() => connector.WithStaticChannelRdpdrDrives("smoke-tests", DriveRedirection.New()));
             connector.WithStaticChannelRdpdrDrives("smoke-tests", drives);
             var error = Throws<IronRdpException>(() => connector.WithStaticChannelRdpdr("smoke-tests", 0));
             True(error.Message.Contains("already attached"), $"error message: {error.Message}");

@@ -43,6 +43,7 @@ A server that does not support Extended Client Data Blocks sees the desktop size
 The native library needs the `rdpsnd-native` feature, on by default; on Linux, building it needs the ALSA development files (`libasound2-dev`) and `pkg-config`.
 Without the feature, `WithStaticChannelRdpSndNative` throws `IronRdpException` with the `WrongOS` kind.
 Opus is not offered, so the server sends PCM, ADPCM or G.711, or AAC to a Windows client.
+Windows servers start audio only once the client has the RDPDR channel: without folders to share, attach it with no device by calling `WithStaticChannelRdpdrDrives(computerName, DriveRedirection.New())`.
 
 ## Drive redirection
 
