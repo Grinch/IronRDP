@@ -345,6 +345,8 @@ pub mod ffi {
         }
 
         pub fn build(&self) -> Result<Box<Config>, Box<IronRdpError>> {
+            // Checked before the desktop size, so the first missing field is reported first.
+            let credentials = self.credentials.clone().ok_or("credentials not set")?;
             let (monitor_layout, desktop_size) = if self.monitors.is_empty() {
                 (None, self.desktop_size.ok_or("desktop size not set")?)
             } else {
@@ -353,7 +355,7 @@ pub mod ffi {
             };
 
             let connector = ironrdp::connector::Config {
-                credentials: self.credentials.clone().ok_or("credentials not set")?,
+                credentials,
                 domain: self.domain.clone(),
                 enable_tls: self.enable_tls.unwrap_or(false),
                 enable_credssp: self.enable_credssp.unwrap_or(true),
