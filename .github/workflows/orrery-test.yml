@@ -1,0 +1,56 @@
+# Runs the tests of the crates Orrery's changes touch on Linux and macOS, where the Unix-only code (the RDPDR drive
+# backend, among others) is built. Run by hand with a commit pushed to this fork; IronRDP's own CI runs only on master
+# and on pull requests.
+#
+# Only this file and orrery-nuget.yml differ from upstream on master; the commit tested is checked out on its own.
+#
+# Supply chain: every action is pinned by commit, and Rust by the commit's own rust-toolchain.toml.
+
+name: Orrery tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: The full SHA of the commit to test (pushed to this fork)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, macos-15-intel]
+
+    steps:
+      - name: Check the commit
+        env:
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          if ($Env:COMMIT -cnotmatch '^[0-9a-f]{40}$') { throw "commit '$Env:COMMIT' isn't a full, lower-case commit SHA." }
+        shell: pwsh
+
+      - name: Check out ${{ inputs.commit }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+
+      # The ffi crate links ALSA for sound.
+      - name: Install ALSA headers
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev
+
+      - name: Test the drive backend
+        run: cargo test --locked -p ironrdp-rdpdr-native
+
+      - name: Test the ffi crate
+        run: cargo test --locked -p ffi --lib
