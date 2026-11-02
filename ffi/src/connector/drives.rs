@@ -38,9 +38,9 @@ pub mod ffi {
 
         /// Whether this platform can share more than one folder in a session.
         ///
-        /// The Linux and macOS backend serves a single folder, so `add_drive` accepts only one drive there.
+        /// Windows, Linux and macOS each serve every drive from its own folder.
         pub fn supports_multiple_drives() -> bool {
-            cfg!(windows)
+            cfg!(any(windows, target_os = "linux", target_os = "macos"))
         }
 
         /// Shares the local folder `path` as the drive `name`.
@@ -49,7 +49,7 @@ pub mod ffi {
         /// (`C:\Users\me`), not a UNC path. `name` must be nonempty, must not repeat the name of another drive
         /// (ignoring case), and must not contain NUL or a path separator.
         ///
-        /// Fails when a check above fails, and on Linux and macOS when a drive was already added
+        /// Fails when a check above fails, and where only one folder can be shared, when a drive was already added
         /// (see `supports_multiple_drives`).
         pub fn add_drive(&mut self, name: &str, path: &str) -> Result<(), Box<IronRdpError>> {
             if let Some(reason) = super::invalid_drive_name(name) {
@@ -116,5 +116,16 @@ mod tests {
         assert!(drives.add_drive("Temp", folder).is_ok());
         assert!(drives.add_drive("TEMP", folder).is_err());
         assert_eq!(drives.get_count(), 1);
+    }
+
+    #[test]
+    fn several_drives_can_be_added() {
+        let mut drives = super::ffi::DriveRedirection::new();
+        let folder = std::env::temp_dir();
+        let folder = folder.to_str().expect("the temporary folder path is UTF-8");
+
+        assert!(drives.add_drive("One", folder).is_ok());
+        assert!(drives.add_drive("Two", folder).is_ok());
+        assert_eq!(drives.get_count(), 2);
     }
 }

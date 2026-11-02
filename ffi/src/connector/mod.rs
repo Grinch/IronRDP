@@ -388,13 +388,17 @@ pub mod ffi {
 
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             let rdpdr = {
-                // `DriveRedirection::add_drive` accepts a single drive on these platforms.
-                let Some(folder) = drives.0.first() else {
+                // Each drive is served from its own folder, numbered from 1 as on Windows.
+                let Some(first) = drives.0.first() else {
                     return Err("no drive to redirect".into());
                 };
-                let backend = ironrdp_rdpdr_native::backend::NixRdpdrBackend::new(folder.path.clone());
-                ironrdp::rdpdr::Rdpdr::new(Box::new(backend), computer_name.to_owned())
-                    .with_drives(Some(vec![(1, folder.name.clone())]))
+                let mut backend = ironrdp_rdpdr_native::backend::NixRdpdrBackend::new(first.path.clone());
+                let mut announced = Vec::with_capacity(drives.0.len());
+                for (device_id, folder) in (1u32..).zip(&drives.0) {
+                    backend = backend.with_drive_root(device_id, folder.path.clone());
+                    announced.push((device_id, folder.name.clone()));
+                }
+                ironrdp::rdpdr::Rdpdr::new(Box::new(backend), computer_name.to_owned()).with_drives(Some(announced))
             };
 
             #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
