@@ -2,7 +2,7 @@
 
 use core::time::Duration;
 
-use ironrdp_rdpsnd_native::tap::{AudioTap, MAX_QUEUED};
+use ironrdp_rdpsnd_native::tap::{AUDIBLE, AudioTap, MAX_QUEUED};
 
 #[test]
 fn disabled_tap_queues_nothing() {
@@ -61,5 +61,35 @@ fn disabling_discards_the_queue() {
     tap.push(8_000, 1, &[1]);
     tap.set_enabled(false);
     tap.set_enabled(true);
+    assert!(tap.pop().is_none());
+}
+
+#[test]
+fn muting_is_shared_and_off_at_first() {
+    let tap = AudioTap::new();
+    let backend_side = tap.clone();
+    assert!(!backend_side.is_muted());
+    tap.set_muted(true);
+    assert!(backend_side.is_muted());
+    tap.set_muted(false);
+    assert!(!backend_side.is_muted());
+}
+
+#[test]
+fn only_audible_samples_count_as_sound() {
+    let tap = AudioTap::new();
+    assert!(tap.sound_age().is_none());
+    tap.note_played(&[0, AUDIBLE, -AUDIBLE]);
+    assert!(tap.sound_age().is_none(), "the noise floor isn't sound");
+    tap.note_played(&[0, AUDIBLE + 1]);
+    assert!(tap.sound_age().expect("heard") < Duration::from_secs(1));
+}
+
+#[test]
+fn sound_is_noted_while_disabled_and_muted() {
+    let tap = AudioTap::new();
+    tap.set_muted(true);
+    tap.note_played(&[i16::MIN]);
+    assert!(tap.sound_age().is_some());
     assert!(tap.pop().is_none());
 }

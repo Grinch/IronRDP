@@ -539,6 +539,11 @@ impl RdpsndClientHandler for RdpsndBackend {
         stream.decoder.decode(&data, &mut stream.decoded);
         if let Some(tap) = &self.tap {
             tap.push(stream.sample_rate, stream.format.n_channels, &stream.decoded);
+            tap.note_played(&stream.decoded);
+            if tap.is_muted() {
+                // After the tap took its copy, so a recording keeps the sound while this tab plays silence.
+                stream.decoded.fill(0);
+            }
         }
         let written = stream.producer.push_slice(&stream.decoded);
         if written < stream.decoded.len() {

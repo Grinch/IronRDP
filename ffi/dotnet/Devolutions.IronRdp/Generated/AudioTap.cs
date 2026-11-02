@@ -107,6 +107,57 @@ public partial class AudioTap
         }
     }
 
+    public void SetMuted(bool muted)
+    {
+        unsafe
+        {
+            BorrowLease<Raw.AudioTap>? selfLease = null;
+            try
+            {
+                selfLease = _diplomatHandle.Lease(BorrowKind.Shared);
+                Raw.AudioTap.SetMuted(selfLease!.Ptr, muted);
+            }
+            finally
+            {
+                selfLease?.Release();
+            }
+        }
+    }
+
+    public bool IsMuted()
+    {
+        unsafe
+        {
+            BorrowLease<Raw.AudioTap>? selfLease = null;
+            try
+            {
+                selfLease = _diplomatHandle.Lease(BorrowKind.Shared);
+                return Raw.AudioTap.IsMuted(selfLease!.Ptr);
+            }
+            finally
+            {
+                selfLease?.Release();
+            }
+        }
+    }
+
+    public ulong GetSoundAgeMicros()
+    {
+        unsafe
+        {
+            BorrowLease<Raw.AudioTap>? selfLease = null;
+            try
+            {
+                selfLease = _diplomatHandle.Lease(BorrowKind.Shared);
+                return Raw.AudioTap.GetSoundAgeMicros(selfLease!.Ptr);
+            }
+            finally
+            {
+                selfLease?.Release();
+            }
+        }
+    }
+
     public ulong GetDropped()
     {
         unsafe

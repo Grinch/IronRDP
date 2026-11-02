@@ -4,6 +4,9 @@
 //! two dynamic ones) and the client. While enabled, each decoded wave block is queued as interleaved
 //! 16-bit PCM with its layout and the time it was decoded. The queue keeps at most
 //! [`MAX_QUEUED`] of audio; when the client falls behind, the oldest chunks go first.
+//!
+//! Enabled or not, the tap also lets the client mute the connection's playback (a tab's mute button) and tells it
+//! when the connection last played something audible, so it can show which tabs are playing sound.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
@@ -13,6 +16,10 @@ use std::time::Instant;
 
 /// Most audio kept waiting for the client.
 pub const MAX_QUEUED: Duration = Duration::from_secs(10);
+
+/// Samples quieter than this (out of 32767) count as silence for [`AudioTap::sound_age`]: dither and noise floors
+/// aren't sound anyone hears.
+pub const AUDIBLE: i16 = 64;
 
 /// One decoded wave block.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,7 +51,9 @@ struct Queue {
 #[derive(Debug, Default)]
 struct Shared {
     enabled: AtomicBool,
+    muted: AtomicBool,
     queue: Mutex<Queue>,
+    last_audible: Mutex<Option<Instant>>,
 }
 
 /// Shared handle to the tapped audio; clones refer to the same queue.
@@ -92,6 +101,32 @@ impl AudioTap {
             queue.queued = queue.queued.saturating_sub(oldest.duration());
             queue.dropped += 1;
         }
+    }
+
+    /// Mutes or unmutes the connection's playback. Muted playback is silence on the output device; the tap still
+    /// queues what was decoded, so a recording keeps the sound.
+    pub fn set_muted(&self, muted: bool) {
+        self.0.muted.store(muted, Ordering::Relaxed);
+    }
+
+    pub fn is_muted(&self) -> bool {
+        self.0.muted.load(Ordering::Relaxed)
+    }
+
+    /// Notes decoded samples about to be played, remembering when any were audible.
+    pub fn note_played(&self, samples: &[i16]) {
+        if samples.iter().any(|s| s.unsigned_abs() > AUDIBLE.unsigned_abs()) {
+            *self.0.last_audible.lock().unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
+        }
+    }
+
+    /// How long ago the connection last played audible sound, muted or not; `None` if it never has.
+    pub fn sound_age(&self) -> Option<Duration> {
+        self.0
+            .last_audible
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .map(|at| at.elapsed())
     }
 
     /// Takes the oldest queued chunk.

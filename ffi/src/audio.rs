@@ -74,6 +74,32 @@ pub mod ffi {
             None
         }
 
+        /// Mutes or unmutes the connection's playback; the tap still queues what's decoded.
+        pub fn set_muted(&self, muted: bool) {
+            #[cfg(all(feature = "rdpsnd-native", any(windows, target_os = "linux", target_os = "macos")))]
+            self.0.set_muted(muted);
+            #[cfg(not(all(feature = "rdpsnd-native", any(windows, target_os = "linux", target_os = "macos"))))]
+            let _ = muted;
+        }
+
+        pub fn is_muted(&self) -> bool {
+            #[cfg(all(feature = "rdpsnd-native", any(windows, target_os = "linux", target_os = "macos")))]
+            return self.0.is_muted();
+            #[cfg(not(all(feature = "rdpsnd-native", any(windows, target_os = "linux", target_os = "macos"))))]
+            false
+        }
+
+        /// Microseconds since the connection last played audible sound, or `u64::MAX` if it never has.
+        pub fn get_sound_age_micros(&self) -> u64 {
+            #[cfg(all(feature = "rdpsnd-native", any(windows, target_os = "linux", target_os = "macos")))]
+            return self
+                .0
+                .sound_age()
+                .map_or(u64::MAX, |age| u64::try_from(age.as_micros()).unwrap_or(u64::MAX));
+            #[cfg(not(all(feature = "rdpsnd-native", any(windows, target_os = "linux", target_os = "macos"))))]
+            u64::MAX
+        }
+
         /// Chunks dropped because the queue was full.
         pub fn get_dropped(&self) -> u64 {
             #[cfg(all(feature = "rdpsnd-native", any(windows, target_os = "linux", target_os = "macos")))]
