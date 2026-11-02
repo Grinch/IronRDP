@@ -308,6 +308,8 @@ pub struct RdpsndBackend {
     volume_received: bool,
     /// Formats the [`RdpsndClientHandler::get_formats`] fallback advertises.
     formats: Vec<AudioFormat>,
+    /// Receives a copy of the decoded audio.
+    tap: Option<crate::tap::AudioTap>,
 }
 
 impl Default for RdpsndBackend {
@@ -330,7 +332,15 @@ impl RdpsndBackend {
             volume: Arc::new(AtomicU32::new(pack_volume(0xFFFF, 0xFFFF))),
             volume_received: false,
             formats: fallback_formats(),
+            tap: None,
         }
+    }
+
+    /// Sends a copy of every decoded wave block to `tap`.
+    #[must_use]
+    pub fn with_tap(mut self, tap: crate::tap::AudioTap) -> Self {
+        self.tap = Some(tap);
+        self
     }
 
     fn open(&mut self, format: &AudioFormat) -> RdpsndNativeResult<()> {
@@ -527,6 +537,9 @@ impl RdpsndClientHandler for RdpsndBackend {
 
         stream.decoded.clear();
         stream.decoder.decode(&data, &mut stream.decoded);
+        if let Some(tap) = &self.tap {
+            tap.push(stream.sample_rate, stream.format.n_channels, &stream.decoded);
+        }
         let written = stream.producer.push_slice(&stream.decoded);
         if written < stream.decoded.len() {
             warn!(

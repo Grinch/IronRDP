@@ -234,13 +234,31 @@ pub mod ffi {
         ///
         /// [MS-RDPEA]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpea/
         pub fn with_static_channel_rdp_snd_native(&mut self) -> Result<(), Box<IronRdpError>> {
+            self.attach_rdp_snd_native(None)
+        }
+
+        /// Like `with_static_channel_rdp_snd_native`, and also sends a copy of the decoded audio to `tap`.
+        pub fn with_static_channel_rdp_snd_native_tapped(
+            &mut self,
+            tap: &crate::audio::ffi::AudioTap,
+        ) -> Result<(), Box<IronRdpError>> {
+            self.attach_rdp_snd_native(Some(&tap.0))
+        }
+
+        fn attach_rdp_snd_native(&mut self, tap: Option<&crate::audio::TapInner>) -> Result<(), Box<IronRdpError>> {
             #[cfg(all(feature = "rdpsnd-native", any(windows, target_os = "linux", target_os = "macos")))]
             {
                 let Some(connector) = self.0.take() else {
                     return Err(ValueConsumedError::for_item("connector").into());
                 };
-                let backend = ironrdp_rdpsnd_native::cpal::RdpsndBackend::new();
-                self.0 = Some(connector.with_static_channel(ironrdp::rdpsnd::client::Rdpsnd::new(Box::new(backend))));
+                let backend = || {
+                    let backend = ironrdp_rdpsnd_native::cpal::RdpsndBackend::new();
+                    match tap {
+                        Some(tap) => backend.with_tap(tap.clone()),
+                        None => backend,
+                    }
+                };
+                self.0 = Some(connector.with_static_channel(ironrdp::rdpsnd::client::Rdpsnd::new(Box::new(backend()))));
 
                 // Windows 8 and later prefer the dynamic channels, as mstsc uses them, and keep playing over them
                 // after a Deactivate-Reactivate (a resize); over the static channel the audio stops there for good.
@@ -248,8 +266,7 @@ pub mod ffi {
                 // once its formats are negotiated.
                 use ironrdp::rdpsnd::client::{DVC_CHANNEL_NAME, LOSSY_DVC_CHANNEL_NAME, RdpsndDvcState};
                 let origin = std::time::Instant::now();
-                let state = RdpsndDvcState::new(Box::new(ironrdp_rdpsnd_native::cpal::RdpsndBackend::new()))
-                    .with_clock(Box::new(move || origin.elapsed()));
+                let state = RdpsndDvcState::new(Box::new(backend())).with_clock(Box::new(move || origin.elapsed()));
                 let lossy = state.clone();
                 let drdynvc = self.drdynvc_mut()?;
                 drdynvc.attach_dynamic_channel_factory(DVC_CHANNEL_NAME, move || state.channel());
@@ -259,6 +276,7 @@ pub mod ffi {
 
             #[cfg(not(all(feature = "rdpsnd-native", any(windows, target_os = "linux", target_os = "macos"))))]
             {
+                let _ = tap;
                 Err(crate::error::WrongOSError::expected_platform("windows, linux or macos")
                     .with_custom_message("native audio playback is not available in this build: ")
                     .into())

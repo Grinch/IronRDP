@@ -292,6 +292,33 @@ public partial class ClientConnector
     }
 
     /// <exception cref="IronRdpException"></exception>
+    public void WithStaticChannelRdpSndNativeTapped(AudioTap tap)
+    {
+        unsafe
+        {
+            if (tap == null) throw new ArgumentNullException(nameof(tap));
+            BorrowLease<Raw.ClientConnector>? selfLease = null;
+            BorrowLease<Raw.AudioTap>? tapLease = null;
+            try
+            {
+                selfLease = _diplomatHandle.Lease(BorrowKind.Exclusive);
+                tapLease = tap._diplomatHandle.Lease(BorrowKind.Shared);
+                var result = Raw.ClientConnector.WithStaticChannelRdpSndNativeTapped(selfLease!.Ptr, tapLease!.Ptr);
+                if (!result.IsOk)
+                {
+                    throw new IronRdpException(new IronRdpError(result.Err));
+                }
+                return;
+            }
+            finally
+            {
+                selfLease?.Release();
+                tapLease?.Release();
+            }
+        }
+    }
+
+    /// <exception cref="IronRdpException"></exception>
     public void WithStaticChannelRdpdr(string computerName, uint smartCardDeviceId)
     {
         unsafe
