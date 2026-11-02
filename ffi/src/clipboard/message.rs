@@ -14,6 +14,75 @@ pub mod ffi {
     pub struct ClipboardMessage(pub ironrdp::cliprdr::backend::ClipboardMessage);
 
     impl ClipboardMessage {
+        /// Offers local files to the remote, for `ActiveStage::submit_clipboard_message`.
+        ///
+        /// Needs file transfer negotiated (`STREAM_FILECLIP_ENABLED`). The remote then asks for
+        /// their contents by index into `files` (`FileContentsRequested` events of a
+        /// `CallbackCliprdr`).
+        pub fn new_initiate_file_copy(files: &FileDescriptorList) -> Box<ClipboardMessage> {
+            Box::new(ClipboardMessage(
+                ironrdp::cliprdr::backend::ClipboardMessage::SendInitiateFileCopy(files.0.clone()),
+            ))
+        }
+
+        /// Asks the remote for the size of file `index` of its file list (`size_request`), or for
+        /// `requested_size` bytes of it from `position`. `data_id` is the lock of the file list,
+        /// used when `has_data_id`. The answer arrives as a `FileContentsResponse` event with the
+        /// same `stream_id`.
+        pub fn new_file_contents_request(
+            stream_id: u32,
+            index: i32,
+            size_request: bool,
+            position: u64,
+            requested_size: u32,
+            has_data_id: bool,
+            data_id: u32,
+        ) -> Box<ClipboardMessage> {
+            use ironrdp::cliprdr::pdu::{FileContentsFlags, FileContentsRequest};
+
+            Box::new(ClipboardMessage(
+                ironrdp::cliprdr::backend::ClipboardMessage::SendFileContentsRequest(FileContentsRequest {
+                    stream_id,
+                    index,
+                    flags: if size_request {
+                        FileContentsFlags::SIZE
+                    } else {
+                        FileContentsFlags::RANGE
+                    },
+                    position,
+                    requested_size,
+                    data_id: has_data_id.then_some(data_id),
+                }),
+            ))
+        }
+
+        /// Answers a size request of the remote with the file's size.
+        pub fn new_file_contents_size(stream_id: u32, size: u64) -> Box<ClipboardMessage> {
+            Box::new(ClipboardMessage(
+                ironrdp::cliprdr::backend::ClipboardMessage::SendFileContentsResponse(
+                    ironrdp::cliprdr::pdu::FileContentsResponse::new_size_response(stream_id, size),
+                ),
+            ))
+        }
+
+        /// Answers a range request of the remote with the bytes read.
+        pub fn new_file_contents_data(stream_id: u32, data: &[u8]) -> Box<ClipboardMessage> {
+            Box::new(ClipboardMessage(
+                ironrdp::cliprdr::backend::ClipboardMessage::SendFileContentsResponse(
+                    ironrdp::cliprdr::pdu::FileContentsResponse::new_data_response(stream_id, data.to_vec()),
+                ),
+            ))
+        }
+
+        /// Answers a request of the remote that cannot be served, such as a file no longer there.
+        pub fn new_file_contents_error(stream_id: u32) -> Box<ClipboardMessage> {
+            Box::new(ClipboardMessage(
+                ironrdp::cliprdr::backend::ClipboardMessage::SendFileContentsResponse(
+                    ironrdp::cliprdr::pdu::FileContentsResponse::new_error(stream_id),
+                ),
+            ))
+        }
+
         #[diplomat::attr(auto, getter = "message_type")]
         pub fn get_message_type(&self) -> ClipboardMessageType {
             match &self.0 {
@@ -242,6 +311,95 @@ pub mod ffi {
         #[diplomat::attr(auto, getter = "value")]
         pub fn get_value(&self) -> u32 {
             self.0.value()
+        }
+    }
+
+    /// Files on a clipboard: the remote's (`RemoteFileList` events) or ours to offer
+    /// (`ClipboardMessage::new_initiate_file_copy`).
+    #[diplomat::attr(dotnet, manually_disposable)]
+    #[diplomat::opaque_mut]
+    pub struct FileDescriptorList(pub Vec<ironrdp::cliprdr::pdu::FileDescriptor>);
+
+    impl FileDescriptorList {
+        pub fn new() -> Box<FileDescriptorList> {
+            Box::new(FileDescriptorList(Vec::new()))
+        }
+
+        pub fn push(&mut self, file: &FileDescriptor) {
+            self.0.push(file.0.clone());
+        }
+
+        pub fn len(&self) -> usize {
+            self.0.len()
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.0.is_empty()
+        }
+
+        pub fn get(&self, index: usize) -> Option<Box<FileDescriptor>> {
+            self.0.get(index).cloned().map(FileDescriptor).map(Box::new)
+        }
+    }
+
+    /// One file or folder of a clipboard file list. Names come from the remote and are untrusted:
+    /// check them before making a path of them.
+    #[diplomat::attr(dotnet, manually_disposable)]
+    #[diplomat::opaque]
+    pub struct FileDescriptor(pub ironrdp::cliprdr::pdu::FileDescriptor);
+
+    impl FileDescriptor {
+        /// A file named `name`, in the folder `relative_path` of the copied items (`\`
+        /// separated, empty for the top), `size` bytes long, a folder when `directory`, and last
+        /// written at `last_write_time` (Windows file time, 0 when unknown).
+        pub fn new(
+            name: &str,
+            relative_path: &str,
+            size: u64,
+            directory: bool,
+            last_write_time: u64,
+        ) -> Box<FileDescriptor> {
+            use ironrdp::cliprdr::pdu::ClipboardFileAttributes;
+
+            let mut file = ironrdp::cliprdr::pdu::FileDescriptor::new(name);
+            file.relative_path = (!relative_path.is_empty()).then(|| relative_path.to_owned());
+            file.attributes = Some(if directory {
+                ClipboardFileAttributes::DIRECTORY
+            } else {
+                ClipboardFileAttributes::empty()
+            });
+            file.file_size = (!directory).then_some(size);
+            file.last_write_time = (last_write_time != 0).then_some(last_write_time);
+            Box::new(FileDescriptor(file))
+        }
+
+        pub fn get_name(&self, writeable: &mut DiplomatWrite) {
+            let _ = write!(writeable, "{}", self.0.name);
+        }
+
+        /// The folder it is in among the copied items, `\` separated; empty at the top.
+        pub fn get_relative_path(&self, writeable: &mut DiplomatWrite) {
+            let _ = write!(writeable, "{}", self.0.relative_path.as_deref().unwrap_or_default());
+        }
+
+        pub fn is_directory(&self) -> bool {
+            self.0.attributes.is_some_and(|attributes| {
+                attributes.contains(ironrdp::cliprdr::pdu::ClipboardFileAttributes::DIRECTORY)
+            })
+        }
+
+        pub fn has_size(&self) -> bool {
+            self.0.file_size.is_some()
+        }
+
+        /// The size the remote gave, 0 when it gave none; untrusted.
+        pub fn get_size(&self) -> u64 {
+            self.0.file_size.unwrap_or_default()
+        }
+
+        /// Windows file time of the last write, 0 when not given.
+        pub fn get_last_write_time(&self) -> u64 {
+            self.0.last_write_time.unwrap_or_default()
         }
     }
 

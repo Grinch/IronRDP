@@ -10,4 +10,7 @@ public enum ClipboardEventType : int
     FormatDataResponse = 5,
     Lock = 6,
     Unlock = 7,
+    RemoteFileList = 8,
+    FileContentsRequested = 9,
+    FileContentsResponse = 10,
 }

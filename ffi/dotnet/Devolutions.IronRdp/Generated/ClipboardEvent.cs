@@ -34,6 +34,54 @@ public partial class ClipboardEvent: IDisposable
     }
 
     /// <returns>
+    /// A <c>FfiFileContentsRequest</c> allocated on Rust side.
+    /// </returns>
+    public FfiFileContentsRequest? FileContentsRequest
+    {
+        get
+        {
+            unsafe
+            {
+                BorrowLease<Raw.ClipboardEvent>? selfLease = null;
+                try
+                {
+                    selfLease = _diplomatHandle.Lease(BorrowKind.Shared);
+                    Raw.FfiFileContentsRequest* result = Raw.ClipboardEvent.GetFileContentsRequest(selfLease!.Ptr);
+                    return result == null ? null : new FfiFileContentsRequest(result);
+                }
+                finally
+                {
+                    selfLease?.Release();
+                }
+            }
+        }
+    }
+
+    /// <returns>
+    /// A <c>FfiFileContentsResponse</c> allocated on Rust side.
+    /// </returns>
+    public FfiFileContentsResponse? FileContentsResponse
+    {
+        get
+        {
+            unsafe
+            {
+                BorrowLease<Raw.ClipboardEvent>? selfLease = null;
+                try
+                {
+                    selfLease = _diplomatHandle.Lease(BorrowKind.Shared);
+                    Raw.FfiFileContentsResponse* result = Raw.ClipboardEvent.GetFileContentsResponse(selfLease!.Ptr);
+                    return result == null ? null : new FfiFileContentsResponse(result);
+                }
+                finally
+                {
+                    selfLease?.Release();
+                }
+            }
+        }
+    }
+
+    /// <returns>
     /// A <c>FormatDataResponse</c> allocated on Rust side.
     /// </returns>
     public FormatDataResponse? FormatData
@@ -48,6 +96,30 @@ public partial class ClipboardEvent: IDisposable
                     selfLease = _diplomatHandle.Lease(BorrowKind.Shared);
                     Raw.FormatDataResponse* result = Raw.ClipboardEvent.GetFormatData(selfLease!.Ptr);
                     return result == null ? null : new FormatDataResponse(result);
+                }
+                finally
+                {
+                    selfLease?.Release();
+                }
+            }
+        }
+    }
+
+    /// <returns>
+    /// A <c>FileDescriptorList</c> allocated on Rust side.
+    /// </returns>
+    public FileDescriptorList? RemoteFiles
+    {
+        get
+        {
+            unsafe
+            {
+                BorrowLease<Raw.ClipboardEvent>? selfLease = null;
+                try
+                {
+                    selfLease = _diplomatHandle.Lease(BorrowKind.Shared);
+                    Raw.FileDescriptorList* result = Raw.ClipboardEvent.GetRemoteFiles(selfLease!.Ptr);
+                    return result == null ? null : new FileDescriptorList(result);
                 }
                 finally
                 {
@@ -170,6 +242,46 @@ public partial class ClipboardEvent: IDisposable
                 throw new ObjectDisposedException("ClipboardEvent");
             }
             return inner;
+        }
+    }
+
+    public bool HasRemoteFilesLockId()
+    {
+        unsafe
+        {
+            BorrowLease<Raw.ClipboardEvent>? selfLease = null;
+            try
+            {
+                selfLease = _diplomatHandle.Lease(BorrowKind.Shared);
+                return Raw.ClipboardEvent.HasRemoteFilesLockId(selfLease!.Ptr);
+            }
+            finally
+            {
+                selfLease?.Release();
+            }
+        }
+    }
+
+    /// <exception cref="IronRdpException"></exception>
+    public uint RemoteFilesLockId()
+    {
+        unsafe
+        {
+            BorrowLease<Raw.ClipboardEvent>? selfLease = null;
+            try
+            {
+                selfLease = _diplomatHandle.Lease(BorrowKind.Shared);
+                var result = Raw.ClipboardEvent.RemoteFilesLockId(selfLease!.Ptr);
+                if (!result.IsOk)
+                {
+                    throw new IronRdpException(new IronRdpError(result.Err));
+                }
+                return result.Ok;
+            }
+            finally
+            {
+                selfLease?.Release();
+            }
         }
     }
 

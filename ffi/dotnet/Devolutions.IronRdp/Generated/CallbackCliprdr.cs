@@ -33,6 +33,26 @@ public partial class CallbackCliprdr: IDisposable
         }
     }
 
+    public bool FileTransferNegotiated
+    {
+        get
+        {
+            unsafe
+            {
+                BorrowLease<Raw.CallbackCliprdr>? selfLease = null;
+                try
+                {
+                    selfLease = _diplomatHandle.Lease(BorrowKind.Shared);
+                    return Raw.CallbackCliprdr.GetFileTransferNegotiated(selfLease!.Ptr);
+                }
+                finally
+                {
+                    selfLease?.Release();
+                }
+            }
+        }
+    }
+
     /// <summary>
     /// Creates a managed <c>CallbackCliprdr</c> from a raw handle.
     /// </summary>
@@ -161,6 +181,23 @@ public partial class CallbackCliprdr: IDisposable
                 selfLease = _diplomatHandle.Lease(BorrowKind.Shared);
                 Raw.ClipboardEvent* result = Raw.CallbackCliprdr.NextEventTimeout(selfLease!.Ptr, timeoutMs);
                 return result == null ? null : new ClipboardEvent(result);
+            }
+            finally
+            {
+                selfLease?.Release();
+            }
+        }
+    }
+
+    public void EnableFileTransfer()
+    {
+        unsafe
+        {
+            BorrowLease<Raw.CallbackCliprdr>? selfLease = null;
+            try
+            {
+                selfLease = _diplomatHandle.Lease(BorrowKind.Shared);
+                Raw.CallbackCliprdr.EnableFileTransfer(selfLease!.Ptr);
             }
             finally
             {

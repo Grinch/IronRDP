@@ -12,6 +12,22 @@ internal partial struct ClipboardEvent
     [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClipboardEvent_get_event_type", CallingConvention = CallingConvention.Cdecl)]
     internal static unsafe extern ClipboardEventType GetEventType(ClipboardEvent* handle);
 
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClipboardEvent_get_remote_files", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern FileDescriptorList* GetRemoteFiles(ClipboardEvent* handle);
+
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClipboardEvent_has_remote_files_lock_id", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.U1)]
+    internal static unsafe extern bool HasRemoteFilesLockId(ClipboardEvent* handle);
+
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClipboardEvent_remote_files_lock_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern DiplomatResultUIntIronRdpError RemoteFilesLockId(ClipboardEvent* handle);
+
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClipboardEvent_get_file_contents_request", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern FfiFileContentsRequest* GetFileContentsRequest(ClipboardEvent* handle);
+
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClipboardEvent_get_file_contents_response", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern FfiFileContentsResponse* GetFileContentsResponse(ClipboardEvent* handle);
+
     [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClipboardEvent_get_remote_formats", CallingConvention = CallingConvention.Cdecl)]
     internal static unsafe extern ClipboardFormatIterator* GetRemoteFormats(ClipboardEvent* handle);
 

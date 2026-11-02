@@ -6,6 +6,7 @@
 //! local clipboard, and answers through the `ActiveStage` clipboard methods.
 //! Nothing in it depends on the operating system.
 
+use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -14,7 +15,8 @@ use std::time::Instant;
 use ironrdp::cliprdr::backend::{CliprdrBackend, CliprdrBackendFactory};
 use ironrdp::cliprdr::pdu::{
     ClipboardFormat, ClipboardFormatId, ClipboardFormatName, ClipboardGeneralCapabilityFlags, FileContentsRequest,
-    FileContentsResponse, FileDescriptor, FormatDataRequest, FormatDataResponse, LockDataId, OwnedFormatDataResponse,
+    FileContentsResponse, FileDescriptor, FormatDataRequest, FormatDataResponse, LockDataId, OwnedFileContentsResponse,
+    OwnedFormatDataResponse,
 };
 use ironrdp::cliprdr::{CliprdrClient, CliprdrSvcMessages};
 use ironrdp::pdu::PduResult;
@@ -42,7 +44,10 @@ const MAX_SHORT_FORMAT_NAME_UNITS: usize = 15;
 pub mod ffi {
     use super::{CallbackCliprdrInner, ClipboardEventKind, Limits};
     use crate::clipboard::ffi::CliprdrBackendFactory;
-    use crate::clipboard::message::ffi::{ClipboardFormatId, ClipboardFormatIterator, FormatDataResponse};
+    use crate::clipboard::message::ffi::{
+        ClipboardFormatId, ClipboardFormatIterator, FfiFileContentsRequest, FfiFileContentsResponse,
+        FileDescriptorList, FormatDataResponse,
+    };
     use crate::error::ffi::IronRdpError;
 
     /// A clipboard backend for every platform that queues the clipboard channel's events for the
@@ -60,8 +65,21 @@ pub mod ffi {
     ///   `ActiveStage::submit_clipboard_format_data`, an error response if you have none.
     /// - `FormatDataResponse`: the answer to one paste you initiated, `response_format` naming the
     ///   format that paste requested. Every paste gets exactly one, in the order initiated; a paste
-    ///   of a format this backend cannot receive, such as the file list, gets an error response at
-    ///   once without reaching the remote.
+    ///   of a format this backend cannot receive, such as the file list without file transfer,
+    ///   gets an error response at once without reaching the remote.
+    ///
+    /// With file transfer enabled (`enable_file_transfer`, before connecting) and negotiated
+    /// (`file_transfer_negotiated`), files go both ways:
+    ///
+    /// - Pasting the remote's "FileGroupDescriptorW" format is answered by a `RemoteFileList`
+    ///   event instead of a `FormatDataResponse`, in the same order. Ask for each file's bytes with
+    ///   `ClipboardMessage::new_file_contents_request`; each request gets exactly one
+    ///   `FileContentsResponse` event with its stream id, an error one when the transfer can no
+    ///   longer complete. Call `ActiveStage::drive_clipboard_timeouts` every few seconds.
+    /// - Offer local files with `ClipboardMessage::new_initiate_file_copy`. The remote then asks
+    ///   for their sizes and bytes with `FileContentsRequested` events; answer each with
+    ///   `ClipboardMessage::new_file_contents_size`, `new_file_contents_data` or
+    ///   `new_file_contents_error`.
     ///
     /// Event data comes from the remote and is untrusted.
     /// The queue and its data are bounded. When `max_queued_events` events wait, a new one is
@@ -99,6 +117,13 @@ pub mod ffi {
         Lock,
         /// The remote released a lock; see `lock_id`.
         Unlock,
+        /// The answer to a paste of the remote's file list; see `response_format`,
+        /// `remote_files` and `remote_files_lock_id`.
+        RemoteFileList,
+        /// The remote requests the size or bytes of a local file; see `file_contents_request`.
+        FileContentsRequested,
+        /// The answer to a file contents request we sent; see `file_contents_response`.
+        FileContentsResponse,
     }
 
     impl CallbackCliprdr {
@@ -152,6 +177,18 @@ pub mod ffi {
                 .map(Box::new)
         }
 
+        /// Advertises file transfer to the remote from the next connection on. Off by default.
+        pub fn enable_file_transfer(&self) {
+            self.0.file_transfer.store(true, super::Ordering::Relaxed);
+        }
+
+        /// Whether the current connection negotiated file transfer: it was enabled and the remote
+        /// supports it. Known by the `Ready` event.
+        #[diplomat::attr(auto, getter = "file_transfer_negotiated")]
+        pub fn get_file_transfer_negotiated(&self) -> bool {
+            self.0.queue.lock().file_transfer_negotiated
+        }
+
         /// How many events were dropped because the queue was full, over the object's lifetime.
         #[diplomat::attr(auto, getter = "dropped_event_count")]
         pub fn get_dropped_event_count(&self) -> u64 {
@@ -171,6 +208,54 @@ pub mod ffi {
                 ClipboardEventKind::FormatDataResponse { .. } => ClipboardEventType::FormatDataResponse,
                 ClipboardEventKind::Lock(_) => ClipboardEventType::Lock,
                 ClipboardEventKind::Unlock(_) => ClipboardEventType::Unlock,
+                ClipboardEventKind::RemoteFileList { .. } => ClipboardEventType::RemoteFileList,
+                ClipboardEventKind::FileContentsRequested(_) => ClipboardEventType::FileContentsRequested,
+                ClipboardEventKind::FileContentsResponse(_) => ClipboardEventType::FileContentsResponse,
+            }
+        }
+
+        /// The remote's files (`RemoteFileList`). Names and sizes are untrusted.
+        #[diplomat::attr(auto, getter = "remote_files")]
+        pub fn get_remote_files(&self) -> Option<Box<FileDescriptorList>> {
+            match &self.0 {
+                ClipboardEventKind::RemoteFileList { files, .. } => Some(Box::new(FileDescriptorList(files.clone()))),
+                _ => None,
+            }
+        }
+
+        /// Whether the remote's file list is locked (`RemoteFileList`); if so, pass
+        /// `remote_files_lock_id` with each file contents request.
+        pub fn has_remote_files_lock_id(&self) -> bool {
+            matches!(&self.0, ClipboardEventKind::RemoteFileList { lock_id: Some(_), .. })
+        }
+
+        /// The clipDataId of the lock on the remote's file list (`RemoteFileList`).
+        pub fn remote_files_lock_id(&self) -> Result<u32, Box<IronRdpError>> {
+            match &self.0 {
+                ClipboardEventKind::RemoteFileList { lock_id: Some(id), .. } => Ok(*id),
+                _ => Err("not a locked remote file list".into()),
+            }
+        }
+
+        /// What the remote wants of a local file (`FileContentsRequested`).
+        #[diplomat::attr(auto, getter = "file_contents_request")]
+        pub fn get_file_contents_request(&self) -> Option<Box<FfiFileContentsRequest>> {
+            match &self.0 {
+                ClipboardEventKind::FileContentsRequested(request) => {
+                    Some(Box::new(FfiFileContentsRequest(request.clone())))
+                }
+                _ => None,
+            }
+        }
+
+        /// The size or bytes the remote sent, or an error (`FileContentsResponse`).
+        #[diplomat::attr(auto, getter = "file_contents_response")]
+        pub fn get_file_contents_response(&self) -> Option<Box<FfiFileContentsResponse>> {
+            match &self.0 {
+                ClipboardEventKind::FileContentsResponse(response) => {
+                    Some(Box::new(FfiFileContentsResponse(response.clone())))
+                }
+                _ => None,
             }
         }
 
@@ -199,7 +284,8 @@ pub mod ffi {
         #[diplomat::attr(auto, getter = "response_format")]
         pub fn get_response_format(&self) -> Option<Box<ClipboardFormatId>> {
             match &self.0 {
-                ClipboardEventKind::FormatDataResponse { format, .. } => Some(Box::new(ClipboardFormatId(*format))),
+                ClipboardEventKind::FormatDataResponse { format, .. }
+                | ClipboardEventKind::RemoteFileList { format, .. } => Some(Box::new(ClipboardFormatId(*format))),
                 _ => None,
             }
         }
@@ -251,6 +337,33 @@ pub(crate) enum ClipboardEventKind {
     },
     Lock(u32),
     Unlock(u32),
+    RemoteFileList {
+        format: ClipboardFormatId,
+        files: Vec<FileDescriptor>,
+        lock_id: Option<u32>,
+    },
+    FileContentsRequested(FileContentsRequest),
+    FileContentsResponse(OwnedFileContentsResponse),
+}
+
+impl ClipboardEventKind {
+    /// Whether the event answers something the embedder waits for, a paste or a file contents
+    /// request, so it is never dropped. How many there are is bounded by what the embedder asked.
+    fn is_answer(&self) -> bool {
+        matches!(
+            self,
+            Self::FormatDataResponse { .. } | Self::RemoteFileList { .. } | Self::FileContentsResponse(_)
+        )
+    }
+
+    /// The bytes it holds that count against `max_queued_data_size`.
+    fn data_size(&self) -> usize {
+        match self {
+            Self::FormatDataResponse { response, .. } => response.data().len(),
+            Self::FileContentsResponse(response) => response.data().len(),
+            _ => 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -281,6 +394,8 @@ struct QueueState {
     overflow_dropped: u64,
     /// The connection whose backend may queue; each backend built starts a new one.
     connection: u64,
+    /// Whether that connection negotiated file transfer.
+    file_transfer_negotiated: bool,
 }
 
 impl EventQueue {
@@ -297,6 +412,7 @@ impl EventQueue {
         state.bounded_events = 0;
         state.queued_data_size = 0;
         state.overflow_dropped = 0;
+        state.file_transfer_negotiated = false;
         state.connection
     }
 
@@ -349,20 +465,46 @@ impl EventQueue {
     /// Queues the answer to a paste. It is never dropped, so that every paste is answered; data
     /// past the size limits is replaced by an error response.
     fn push_response(&self, connection: u64, format: ClipboardFormatId, response: FormatDataResponse<'_>) {
+        let size = response.data().len();
+        self.push_answer(connection, size, |fits| ClipboardEventKind::FormatDataResponse {
+            format,
+            response: if fits {
+                response.into_owned()
+            } else {
+                OwnedFormatDataResponse::new_error()
+            },
+        });
+    }
+
+    /// Queues the answer to a file contents request, as `push_response` does a paste's.
+    fn push_file_response(&self, connection: u64, response: FileContentsResponse<'_>) {
+        let size = response.data().len();
+        let stream_id = response.stream_id();
+        self.push_answer(connection, size, |fits| {
+            ClipboardEventKind::FileContentsResponse(if fits {
+                response.into_owned()
+            } else {
+                OwnedFileContentsResponse::new_error(stream_id)
+            })
+        });
+    }
+
+    /// Queues an answer holding `size` bytes, which `make` builds knowing whether those bytes fit
+    /// the limits; one that doesn't fit carries an error instead.
+    fn push_answer(&self, connection: u64, size: usize, make: impl FnOnce(bool) -> ClipboardEventKind) {
         let mut state = self.lock();
         if state.connection != connection {
-            debug!("Ignored a clipboard format data response of an earlier connection");
+            debug!("Ignored a clipboard answer of an earlier connection");
             return;
         }
 
-        let size = response.data().len();
-        let response = if self.limits.max_format_data_size < size {
+        let fits = if self.limits.max_format_data_size < size {
             warn!(
                 size,
                 max_size = self.limits.max_format_data_size,
                 "Clipboard data is too large, passing an error response instead"
             );
-            OwnedFormatDataResponse::new_error()
+            false
         } else if self.limits.max_queued_data_size - state.queued_data_size < size {
             warn!(
                 size,
@@ -370,15 +512,14 @@ impl EventQueue {
                 max_queued = self.limits.max_queued_data_size,
                 "Queued clipboard data would exceed its limit, passing an error response instead"
             );
-            OwnedFormatDataResponse::new_error()
+            false
         } else {
-            response.into_owned()
+            true
         };
 
-        state.queued_data_size += response.data().len();
-        state
-            .events
-            .push_back(ClipboardEventKind::FormatDataResponse { format, response });
+        let event = make(fits);
+        state.queued_data_size += event.data_size();
+        state.events.push_back(event);
         drop(state);
         self.available.notify_one();
     }
@@ -419,11 +560,10 @@ impl EventQueue {
 impl QueueState {
     fn take_front(&mut self) -> Option<ClipboardEventKind> {
         let event = self.events.pop_front()?;
-        match &event {
-            ClipboardEventKind::FormatDataResponse { response, .. } => {
-                self.queued_data_size -= response.data().len();
-            }
-            _ => self.bounded_events -= 1,
+        if event.is_answer() {
+            self.queued_data_size -= event.data_size();
+        } else {
+            self.bounded_events -= 1;
         }
 
         Some(event)
@@ -432,6 +572,7 @@ impl QueueState {
 
 pub(crate) struct CallbackCliprdrInner {
     queue: Arc<EventQueue>,
+    file_transfer: Arc<AtomicBool>,
 }
 
 impl CallbackCliprdrInner {
@@ -442,12 +583,14 @@ impl CallbackCliprdrInner {
                 available: Condvar::new(),
                 limits,
             }),
+            file_transfer: Arc::new(AtomicBool::new(false)),
         }
     }
 
     fn factory(&self) -> CallbackCliprdrBackendFactory {
         CallbackCliprdrBackendFactory {
             queue: Arc::clone(&self.queue),
+            file_transfer: Arc::clone(&self.file_transfer),
         }
     }
 
@@ -462,6 +605,7 @@ impl CallbackCliprdrInner {
 
 struct CallbackCliprdrBackendFactory {
     queue: Arc<EventQueue>,
+    file_transfer: Arc<AtomicBool>,
 }
 
 impl CliprdrBackendFactory for CallbackCliprdrBackendFactory {
@@ -473,6 +617,8 @@ impl CliprdrBackendFactory for CallbackCliprdrBackendFactory {
             initiating_paste: None,
             remote_file_list_format: None,
             long_format_names: true,
+            file_transfer: self.file_transfer.load(Ordering::Relaxed),
+            file_transfer_negotiated: false,
         })
     }
 }
@@ -499,6 +645,10 @@ struct CallbackCliprdrBackend {
     /// Whether format lists use Long Format Names; the channel announces them until the remote's
     /// capabilities say otherwise.
     long_format_names: bool,
+    /// Whether file transfer is advertised.
+    file_transfer: bool,
+    /// Whether the remote agreed to file transfer.
+    file_transfer_negotiated: bool,
 }
 
 impl_as_any!(CallbackCliprdrBackend);
@@ -526,9 +676,15 @@ impl CliprdrBackend for CallbackCliprdrBackend {
     }
 
     fn client_capabilities(&self) -> ClipboardGeneralCapabilityFlags {
-        // The backend serves no file contents requests, so it advertises neither STREAM_FILECLIP_ENABLED nor
-        // CAN_LOCK_CLIPDATA.
-        ClipboardGeneralCapabilityFlags::empty()
+        if self.file_transfer {
+            // As the Windows backend: file lists only carry names relative to the copied items, never local paths.
+            ClipboardGeneralCapabilityFlags::STREAM_FILECLIP_ENABLED
+                | ClipboardGeneralCapabilityFlags::FILECLIP_NO_FILE_PATHS
+                | ClipboardGeneralCapabilityFlags::CAN_LOCK_CLIPDATA
+                | ClipboardGeneralCapabilityFlags::HUGE_FILE_SUPPORT_ENABLED
+        } else {
+            ClipboardGeneralCapabilityFlags::empty()
+        }
     }
 
     fn on_ready(&mut self) {
@@ -546,6 +702,12 @@ impl CliprdrBackend for CallbackCliprdrBackend {
     fn on_process_negotiated_capabilities(&mut self, capabilities: ClipboardGeneralCapabilityFlags) {
         debug!(?capabilities, "Clipboard capabilities negotiated");
         self.long_format_names = capabilities.contains(ClipboardGeneralCapabilityFlags::USE_LONG_FORMAT_NAMES);
+        self.file_transfer_negotiated =
+            self.file_transfer && capabilities.contains(ClipboardGeneralCapabilityFlags::STREAM_FILECLIP_ENABLED);
+        let mut state = self.queue.lock();
+        if state.connection == self.connection {
+            state.file_transfer_negotiated = self.file_transfer_negotiated;
+        }
     }
 
     fn on_remote_copy(&mut self, available_formats: &[ClipboardFormat]) {
@@ -585,29 +747,50 @@ impl CliprdrBackend for CallbackCliprdrBackend {
     }
 
     fn on_file_contents_request(&mut self, request: FileContentsRequest) {
-        // File transfer is not negotiated, so a conforming remote does not send this.
-        debug!(
-            stream_id = request.stream_id,
-            "Ignored a clipboard file contents request"
-        );
+        if !self.file_transfer_negotiated {
+            // A conforming remote does not send this without file transfer.
+            debug!(
+                stream_id = request.stream_id,
+                "Ignored a clipboard file contents request"
+            );
+            return;
+        }
+
+        self.push(ClipboardEventKind::FileContentsRequested(request));
     }
 
     fn on_file_contents_response(&mut self, response: FileContentsResponse<'_>) {
-        debug!(
-            stream_id = response.stream_id(),
-            "Ignored a clipboard file contents response"
-        );
+        // The channel answers each request it let through exactly once, synthesizing an error when the transfer can
+        // no longer complete, so this is the one place a stream is retired.
+        self.queue.push_file_response(self.connection, response);
     }
 
-    fn on_remote_file_list(&mut self, files: &[FileDescriptor], _clip_data_id: Option<u32>) {
-        // UNTESTED: `initiate_paste` fails a paste of the file list before sending it, so this runs only if the two
-        // ever disagree on which format is the file list. The paste must still be answered, or the embedder waits
-        // for it forever. When changing either, keep every paste answered exactly once.
-        debug!(
-            file_count = files.len(),
-            "Received a clipboard file list, which this backend does not transfer"
-        );
-        self.answer_paste(OwnedFormatDataResponse::new_error());
+    fn on_remote_file_list(&mut self, files: &[FileDescriptor], clip_data_id: Option<u32>) {
+        // This answers a paste of the file list, in its place among the pastes. Every paste must be answered exactly
+        // once, or the embedder waits for it forever.
+        if !self.file_transfer_negotiated {
+            // UNTESTED: without file transfer, `initiate_paste` fails a paste of the file list before sending it, so
+            // this runs only if the two ever disagree on which format is the file list.
+            debug!(
+                file_count = files.len(),
+                "Received a clipboard file list, which this backend does not transfer"
+            );
+            self.answer_paste(OwnedFormatDataResponse::new_error());
+            return;
+        }
+
+        let Some(format) = self.initiating_paste.take().or_else(|| self.pending_pastes.pop_front()) else {
+            warn!("Ignored a clipboard file list that answers no paste");
+            return;
+        };
+
+        let files = files.to_vec();
+        self.queue
+            .push_answer(self.connection, 0, |_| ClipboardEventKind::RemoteFileList {
+                format,
+                files,
+                lock_id: clip_data_id,
+            });
     }
 
     fn on_lock(&mut self, data_id: LockDataId) {
@@ -635,7 +818,7 @@ pub(crate) fn initiate_paste(
         return cliprdr.initiate_paste(format);
     };
 
-    if Some(format) == backend.remote_file_list_format {
+    if Some(format) == backend.remote_file_list_format && !backend.file_transfer_negotiated {
         debug!(
             ?format,
             "Failing a paste of the clipboard file list, which this backend does not transfer"

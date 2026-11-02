@@ -24,6 +24,13 @@ internal partial struct CallbackCliprdr
     [DllImport(DiplomatNativeLib.Name, EntryPoint = "CallbackCliprdr_next_event_timeout", CallingConvention = CallingConvention.Cdecl)]
     internal static unsafe extern ClipboardEvent* NextEventTimeout(CallbackCliprdr* handle, uint timeoutMs);
 
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "CallbackCliprdr_enable_file_transfer", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern void EnableFileTransfer(CallbackCliprdr* handle);
+
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "CallbackCliprdr_get_file_transfer_negotiated", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.U1)]
+    internal static unsafe extern bool GetFileTransferNegotiated(CallbackCliprdr* handle);
+
     [DllImport(DiplomatNativeLib.Name, EntryPoint = "CallbackCliprdr_get_dropped_event_count", CallingConvention = CallingConvention.Cdecl)]
     internal static unsafe extern ulong GetDroppedEventCount(CallbackCliprdr* handle);
 
