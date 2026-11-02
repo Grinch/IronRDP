@@ -83,7 +83,7 @@ jobs:
           - os: win
             runner: windows-2022
           - os: osx
-            runner: macos-latest
+            runner: macos-15
           - os: linux
             runner: ubuntu-22.04
 
