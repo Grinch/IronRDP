@@ -153,9 +153,13 @@ impl LocalFileSource {
 /// were on the clipboard when that lock was taken, even if the clipboard changed since.
 ///
 /// What the remote knows of is not the latest offer made here: a format list is only sent once
-/// `Cliprdr` processes it, after which the remote answers it with a Format List Response, before
-/// any Lock or request about it ([MS-RDPECLIP] 3.1.5.2.2). Offers are therefore queued as they
-/// are made, and the one the remote acknowledged last is what locks snapshot and requests read.
+/// `Cliprdr` processes it, and the remote answers it with a Format List Response
+/// ([MS-RDPECLIP] 3.1.5.2.2). Offers are therefore queued as they are made, and the one the
+/// remote acknowledged last is what requests without a lock read.
+///
+/// A Lock can come before that response: Windows locks the data of a format list as soon as it
+/// receives one, then answers it (`Cliprdr` does the same, see its `send_lock`). Such
+/// a Lock is for the oldest offer still waiting for its response, so that is what it snapshots.
 #[derive(Debug, Default)]
 pub(crate) struct LocalFiles {
     /// Offers sent, oldest first, waiting for their Format List Response (`None`: no files).
@@ -204,7 +208,19 @@ impl LocalFiles {
     }
 
     pub(crate) fn lock(&mut self, clip_data_id: u32) {
-        let Some(current) = self.current.as_ref() else {
+        // A new lock replaces any the remote took under the same id and never released.
+        self.locked.remove(&clip_data_id);
+        if self.dropped_offers != 0 {
+            // A Lock for an offer whose files are gone: nothing to snapshot.
+            return;
+        }
+
+        let source = match self.offered.front() {
+            Some(pending) => pending.as_ref(),
+            None => self.current.as_ref(),
+        };
+
+        let Some(current) = source else {
             // Locks also arrive when there are no local files, see `Cliprdr`.
             return;
         };
@@ -343,4 +359,61 @@ unsafe fn with_locked<R>(hglobal: HGLOBAL, f: impl FnOnce(&[u8]) -> R) -> Option
     let _ = unsafe { GlobalUnlock(hglobal) };
 
     Some(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn source() -> Rc<LocalFileSource> {
+        Rc::new(LocalFileSource::Paths(Vec::new()))
+    }
+
+    fn locked(files: &LocalFiles, clip_data_id: u32) -> Option<&Rc<LocalFileSource>> {
+        files.locked.get(&clip_data_id)
+    }
+
+    #[test]
+    fn lock_before_the_response_snapshots_the_offer_it_is_for() {
+        let (first, second) = (source(), source());
+        let mut files = LocalFiles::default();
+
+        files.offer(Some(Rc::clone(&first)));
+        files.lock(0);
+        files.acknowledge(true);
+
+        // A second copy: the remote locks it, then answers its format list.
+        files.offer(Some(Rc::clone(&second)));
+        files.lock(1);
+        files.acknowledge(true);
+
+        assert!(Rc::ptr_eq(locked(&files, 0).unwrap(), &first));
+        assert!(Rc::ptr_eq(locked(&files, 1).unwrap(), &second));
+        assert!(Rc::ptr_eq(files.current.as_ref().unwrap(), &second));
+    }
+
+    #[test]
+    fn lock_after_the_response_snapshots_the_acknowledged_offer() {
+        let offer = source();
+        let mut files = LocalFiles::default();
+
+        files.offer(Some(Rc::clone(&offer)));
+        files.acknowledge(true);
+        files.lock(7);
+
+        assert!(Rc::ptr_eq(locked(&files, 7).unwrap(), &offer));
+    }
+
+    #[test]
+    fn lock_for_an_offer_without_files_snapshots_nothing() {
+        let mut files = LocalFiles::default();
+        files.offer(Some(source()));
+        files.acknowledge(true);
+
+        // Text copied over the files: its lock must not keep the files readable.
+        files.offer(None);
+        files.lock(2);
+
+        assert!(locked(&files, 2).is_none());
+    }
 }
