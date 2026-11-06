@@ -80,7 +80,7 @@ use crate::cache::{
     SMALL_CACHE_BYTES, SMALL_CACHE_SLOTS,
 };
 use crate::compositor::{Compositor, OutputUpdate};
-use crate::decode::H264Decoder;
+use crate::decode::{DecodedFrame, H264Decoder, Yuv420Frame};
 use crate::pdu::{
     Avc420BitmapStream, Avc444BitmapStream, CacheImportOfferPdu, CacheImportReplyPdu, CacheToSurfacePdu,
     CapabilitiesAdvertisePdu, CapabilitiesV8Flags, CapabilitiesV10Flags, CapabilitiesV81Flags, CapabilitiesV103Flags,
@@ -97,8 +97,13 @@ use crate::pdu::{
 /// the same bound the RemoteFX Progressive path applies.
 const MAX_RFX_CLIPPING_WORK: usize = 1 << 20;
 
-/// Max capacity to keep for decompressed buffer when cleared.
-const MAX_DECOMPRESSED_BUFFER_CAPACITY: usize = 16384; // 16 KiB
+/// Capacity the decompressed-message buffer keeps between messages.
+///
+/// A full-screen frame decompresses to a few MiB, and regrowing the buffer to that from a small
+/// capacity for every message costs a reallocation and copy at each doubling. Up to this much is
+/// kept, so steady traffic reuses one allocation, while a rare oversized message does not hold its
+/// memory for the rest of the session.
+const MAX_DECOMPRESSED_BUFFER_CAPACITY: usize = 8 * 1024 * 1024;
 
 // ============================================================================
 // Surface Management
@@ -1246,9 +1251,9 @@ impl GraphicsPipelineClient {
         // A decoder returning YUV planes is converted with the transform MS-RDPEGFX
         // specifies, whatever matrix it would convert with itself.
         let frame = if decoder.supports_yuv420() {
-            decoder.decode_yuv420(stream.data).map(|picture| picture.to_rgba())
+            decoder.decode_yuv420(stream.data).map(Avc420Picture::Yuv)
         } else {
-            decoder.decode(stream.data)
+            decoder.decode(stream.data).map(Avc420Picture::Rgba)
         }
         .map_err(|e| pdu_other_err!("H.264 decode", source: e))?;
 
@@ -1314,8 +1319,7 @@ impl GraphicsPipelineClient {
             // No region metadata: fall back to the single bounding-box update,
             // copying from the frame origin. This matches the pre-#2042 behavior
             // for streams that legitimately omit regionRects.
-            let cropped_data = crop_decoded_frame(frame.data(), frame.width(), frame.height(), dest_width, dest_height);
-            emit_avc420(dest_rect.clone(), cropped_data);
+            emit_avc420(dest_rect.clone(), frame.crop(dest_width, dest_height));
             return Ok(());
         }
 
@@ -1358,7 +1362,7 @@ impl GraphicsPipelineClient {
 
             // Copy pixels (x, y) -> (x, y): the source in the decoded frame is the
             // region's own top-left, not the frame origin.
-            let data = copy_frame_region(frame.data(), frame.width(), &clipped);
+            let data = frame.region(&clipped);
             emit_avc420(clipped, data);
         }
         Ok(())
@@ -1494,8 +1498,8 @@ impl GraphicsPipelineClient {
             .decode(bitmap_data, dest_width, dest_height)
             .map_err(|e| pdu_other_err!("ClearCodec decode", source: e))?;
 
-        // ClearCodec outputs BGRA; convert to RGBA for the uniform BitmapUpdate format
-        let rgba = convert_bgra_to_rgba(&bgra);
+        // ClearCodec outputs BGRA; reorder it in place to RGBA for the uniform BitmapUpdate format
+        let rgba = convert_bgra_to_rgba(bgra);
 
         let update = BitmapUpdate {
             surface_id,
@@ -1926,7 +1930,7 @@ impl GraphicsPipelineClient {
         // BitmapUpdate.data is always RGBA8888 regardless of codec -- this is
         // the convention so that handlers get a uniform pixel format.
         // Uncompressed wire format is 32-bit LE (0xAARRGGBB → bytes [B, G, R, A]).
-        let rgba_data = convert_uncompressed_to_rgba(&pdu.bitmap_data);
+        let rgba_data = convert_uncompressed_to_rgba(pdu.bitmap_data);
 
         let update = BitmapUpdate {
             surface_id: pdu.surface_id,
@@ -2062,20 +2066,23 @@ fn bitmap_cache_limits(caps: &CodecCapabilities) -> (u16, usize) {
 /// taken from the stream.
 fn convert_rgb24_to_rgba(src: &[u8]) -> Vec<u8> {
     debug_assert!(src.len().is_multiple_of(3), "RGB24 input length not aligned to 3 bytes");
-    let mut dst = Vec::with_capacity(src.len() / 3 * 4);
-    for pixel in src.chunks_exact(3) {
-        dst.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 0xFF]);
+    let mut dst = vec![0; src.len() / 3 * 4];
+    for (dst, src) in dst.chunks_exact_mut(4).zip(src.chunks_exact(3)) {
+        dst.copy_from_slice(&[src[0], src[1], src[2], 0xFF]);
     }
     dst
 }
 
-fn convert_bgra_to_rgba(src: &[u8]) -> Vec<u8> {
-    debug_assert!(src.len().is_multiple_of(4), "BGRA input length not aligned to 4 bytes");
-    let mut dst = Vec::with_capacity(src.len());
-    for pixel in src.chunks_exact(4) {
-        dst.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+fn convert_bgra_to_rgba(mut pixels: Vec<u8>) -> Vec<u8> {
+    debug_assert!(
+        pixels.len().is_multiple_of(4),
+        "BGRA input length not aligned to 4 bytes"
+    );
+    pixels.truncate(pixels.len() / 4 * 4);
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
     }
-    dst
+    pixels
 }
 
 /// Convert uncompressed 32bpp little-endian pixels to RGBA8888
@@ -2083,15 +2090,60 @@ fn convert_bgra_to_rgba(src: &[u8]) -> Vec<u8> {
 /// The wire format for uncompressed graphics is 0xAARRGGBB in a 32-bit
 /// little-endian word, which corresponds to bytes [B, G, R, A]. This
 /// reorders to [R, G, B, 0xFF], treating all pixels as fully opaque.
-fn convert_uncompressed_to_rgba(src: &[u8]) -> Vec<u8> {
-    let mut dst = Vec::with_capacity(src.len());
-    for pixel in src.chunks_exact(4) {
-        let b = pixel[0];
-        let g = pixel[1];
-        let r = pixel[2];
-        dst.extend_from_slice(&[r, g, b, 0xFF]);
+fn convert_uncompressed_to_rgba(mut pixels: Vec<u8>) -> Vec<u8> {
+    pixels.truncate(pixels.len() / 4 * 4);
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+        pixel[3] = 0xFF;
     }
-    dst
+    pixels
+}
+
+/// An AVC420 picture in the form the H.264 decoder returned it.
+///
+/// A YUV picture is converted only where it is painted, straight into each update's buffer.
+enum Avc420Picture {
+    Yuv(Yuv420Frame),
+    Rgba(DecodedFrame),
+}
+
+impl Avc420Picture {
+    fn width(&self) -> u32 {
+        match self {
+            Self::Yuv(picture) => u32::from(picture.width()),
+            Self::Rgba(frame) => frame.width(),
+        }
+    }
+
+    fn height(&self) -> u32 {
+        match self {
+            Self::Yuv(picture) => u32::from(picture.height()),
+            Self::Rgba(frame) => frame.height(),
+        }
+    }
+
+    /// The RGBA pixels of `region`, which the caller clipped to the picture, taken from the same
+    /// coordinates; see [`copy_frame_region`].
+    fn region(&self, region: &ExclusiveRectangle) -> Vec<u8> {
+        match self {
+            Self::Yuv(picture) => picture.region_to_rgba(region),
+            Self::Rgba(frame) => copy_frame_region(frame.data(), frame.width(), region),
+        }
+    }
+
+    /// The top-left `width` by `height` RGBA pixels, cropped to the picture; see
+    /// [`crop_decoded_frame`].
+    fn crop(&self, width: u16, height: u16) -> Vec<u8> {
+        match self {
+            Self::Yuv(picture) => picture.region_to_rgba(&ExclusiveRectangle {
+                left: 0,
+                top: 0,
+                right: width,
+                bottom: height,
+            }),
+            Self::Rgba(frame) => crop_decoded_frame(frame.data(), frame.width(), frame.height(), width, height),
+        }
+    }
 }
 
 /// Crop a decoded RGBA frame to target dimensions
@@ -2646,7 +2698,7 @@ mod tests {
             0xFF, 0x00, 0x00, 0xCC, // B=255, G=0, R=0, A=204 (blue)
             0x00, 0xFF, 0x00, 0x80, // B=0, G=255, R=0, A=128 (green)
         ];
-        let rgba = convert_bgra_to_rgba(&bgra);
+        let rgba = convert_bgra_to_rgba(bgra);
         // Expected: [R, G, B, A] per pixel
         assert_eq!(
             rgba,
@@ -2664,7 +2716,7 @@ mod tests {
             0x00, 0x80, 0xFF, 0xCC, // B=0, G=128, R=255, A=204
             0x10, 0x20, 0x30, 0x40, // B=16, G=32, R=48, A=64
         ];
-        let rgba = convert_uncompressed_to_rgba(&wire_pixels);
+        let rgba = convert_uncompressed_to_rgba(wire_pixels);
         // Expected: [R, G, B, 0xFF] per pixel (alpha forced to opaque)
         assert_eq!(rgba, vec![0xFF, 0x80, 0x00, 0xFF, 0x30, 0x20, 0x10, 0xFF]);
     }
@@ -3521,7 +3573,7 @@ mod tests {
     }
 
     impl H264Decoder for CoordinateDecoder {
-        fn decode(&mut self, _data: &[u8]) -> crate::decode::DecoderResult<crate::decode::DecodedFrame> {
+        fn decode(&mut self, _data: &[u8]) -> crate::decode::DecoderResult<DecodedFrame> {
             let (w, h) = (self.width, self.height);
             let mut data = Vec::with_capacity(usize::try_from(w * h * 4).unwrap_or(0));
             for y in 0..h {
@@ -3531,7 +3583,7 @@ mod tests {
                     data.extend_from_slice(&[px, py, 0, 0xFF]);
                 }
             }
-            Ok(crate::decode::DecodedFrame::new(data, w, h))
+            Ok(DecodedFrame::new(data, w, h))
         }
     }
 
