@@ -80,7 +80,7 @@ use crate::cache::{
     SMALL_CACHE_BYTES, SMALL_CACHE_SLOTS,
 };
 use crate::compositor::{Compositor, OutputUpdate};
-use crate::decode::{DecoderFactory, H264Decoder};
+use crate::decode::{DecodedFrame, DecoderFactory, H264Decoder, Yuv420Frame};
 use crate::pdu::{
     Avc420BitmapStream, Avc444BitmapStream, CacheImportOfferPdu, CacheImportReplyPdu, CacheToSurfacePdu,
     CapabilitiesAdvertisePdu, CapabilitiesV8Flags, CapabilitiesV10Flags, CapabilitiesV81Flags, CapabilitiesV103Flags,
@@ -1337,9 +1337,9 @@ impl GraphicsPipelineClient {
         // A decoder returning YUV planes is converted with the transform MS-RDPEGFX
         // specifies, whatever matrix it would convert with itself.
         let frame = if decoder.supports_yuv420() {
-            decoder.decode_yuv420(stream.data).map(|picture| picture.to_rgba())
+            decoder.decode_yuv420(stream.data).map(Avc420Picture::Yuv)
         } else {
-            decoder.decode(stream.data)
+            decoder.decode(stream.data).map(Avc420Picture::Rgba)
         }
         .map_err(|e| pdu_other_err!("H.264 decode", source: e))?;
 
@@ -1405,8 +1405,7 @@ impl GraphicsPipelineClient {
             // No region metadata: fall back to the single bounding-box update,
             // copying from the frame origin. This matches the pre-#2042 behavior
             // for streams that legitimately omit regionRects.
-            let cropped_data = crop_decoded_frame(frame.data(), frame.width(), frame.height(), dest_width, dest_height);
-            emit_avc420(dest_rect.clone(), cropped_data);
+            emit_avc420(dest_rect.clone(), frame.crop(dest_width, dest_height));
             return Ok(());
         }
 
@@ -1449,7 +1448,7 @@ impl GraphicsPipelineClient {
 
             // Copy pixels (x, y) -> (x, y): the source in the decoded frame is the
             // region's own top-left, not the frame origin.
-            let data = copy_frame_region(frame.data(), frame.width(), &clipped);
+            let data = frame.region(&clipped);
             emit_avc420(clipped, data);
         }
         Ok(())
@@ -2182,6 +2181,53 @@ fn convert_uncompressed_to_rgba(src: &[u8]) -> Vec<u8> {
         dst.extend_from_slice(&[r, g, b, 0xFF]);
     }
     dst
+}
+
+/// An AVC420 picture in the form the H.264 decoder returned it.
+///
+/// A YUV picture is converted only where it is painted, straight into each update's buffer.
+enum Avc420Picture {
+    Yuv(Yuv420Frame),
+    Rgba(DecodedFrame),
+}
+
+impl Avc420Picture {
+    fn width(&self) -> u32 {
+        match self {
+            Self::Yuv(picture) => u32::from(picture.width()),
+            Self::Rgba(frame) => frame.width(),
+        }
+    }
+
+    fn height(&self) -> u32 {
+        match self {
+            Self::Yuv(picture) => u32::from(picture.height()),
+            Self::Rgba(frame) => frame.height(),
+        }
+    }
+
+    /// The RGBA pixels of `region`, which the caller clipped to the picture, taken from the same
+    /// coordinates; see [`copy_frame_region`].
+    fn region(&self, region: &ExclusiveRectangle) -> Vec<u8> {
+        match self {
+            Self::Yuv(picture) => picture.region_to_rgba(region),
+            Self::Rgba(frame) => copy_frame_region(frame.data(), frame.width(), region),
+        }
+    }
+
+    /// The top-left `width` by `height` RGBA pixels, cropped to the picture; see
+    /// [`crop_decoded_frame`].
+    fn crop(&self, width: u16, height: u16) -> Vec<u8> {
+        match self {
+            Self::Yuv(picture) => picture.region_to_rgba(&ExclusiveRectangle {
+                left: 0,
+                top: 0,
+                right: width,
+                bottom: height,
+            }),
+            Self::Rgba(frame) => crop_decoded_frame(frame.data(), frame.width(), frame.height(), width, height),
+        }
+    }
 }
 
 /// Crop a decoded RGBA frame to target dimensions
@@ -3613,7 +3659,7 @@ mod tests {
     }
 
     impl H264Decoder for CoordinateDecoder {
-        fn decode(&mut self, _data: &[u8]) -> crate::decode::DecoderResult<crate::decode::DecodedFrame> {
+        fn decode(&mut self, _data: &[u8]) -> crate::decode::DecoderResult<DecodedFrame> {
             let (w, h) = (self.width, self.height);
             let mut data = Vec::with_capacity(usize::try_from(w * h * 4).unwrap_or(0));
             for y in 0..h {
@@ -3623,7 +3669,7 @@ mod tests {
                     data.extend_from_slice(&[px, py, 0, 0xFF]);
                 }
             }
-            Ok(crate::decode::DecodedFrame::new(data, w, h))
+            Ok(DecodedFrame::new(data, w, h))
         }
     }
 
