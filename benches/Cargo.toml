@@ -14,6 +14,11 @@ name = "rfx-decode"
 path = "src/rfx_decode/main.rs"
 harness = false
 
+[[bench]]
+name = "egfx-decode"
+path = "src/egfx_decode/main.rs"
+harness = false
+
 [features]
 default = ["qoi", "qoiz"]
 qoi = ["ironrdp/qoi"]
@@ -36,6 +41,9 @@ tracing = { version = "0.1", features = ["log"] }
 
 [dev-dependencies]
 criterion = "0.8"
+ironrdp-dvc = { path = "../crates/ironrdp-dvc" }
+ironrdp-egfx = { path = "../crates/ironrdp-egfx" }
+ironrdp-session = { path = "../crates/ironrdp-session" }
 rfx-decode-fixtures = { path = "rfx-decode-fixtures" }
 
 [lints]
