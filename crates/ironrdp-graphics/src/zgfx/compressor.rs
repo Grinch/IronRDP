@@ -9,9 +9,7 @@
 
 use std::{collections::HashMap, io::Write as _};
 
-use bitvec::prelude::*;
-
-use super::{FixedCircularBuffer, HISTORY_SIZE, TOKEN_TABLE, ZgfxError};
+use super::{FixedCircularBuffer, HISTORY_SIZE, TOKEN_TABLE, Token, ZgfxError};
 const MIN_MATCH_LENGTH: usize = 3;
 const MAX_MATCH_LENGTH: usize = 65535;
 /// Maximum back-reference distance (last token in MS-RDPEGFX table)
@@ -241,8 +239,8 @@ impl Compressor {
                 let max_distance = distance_base as usize + (1 << distance_value_size) - 1;
                 if distance <= max_distance {
                     return MatchToken {
-                        prefix: token.prefix,
-                        distance_value_size,
+                        token,
+                        distance_value_size: distance_value_size as usize,
                         distance_base: distance_base as usize,
                     };
                 }
@@ -256,8 +254,8 @@ impl Compressor {
         } = TOKEN_TABLE[39].ty
         {
             MatchToken {
-                prefix: TOKEN_TABLE[39].prefix,
-                distance_value_size,
+                token: &TOKEN_TABLE[39],
+                distance_value_size: distance_value_size as usize,
                 distance_base: distance_base as usize,
             }
         } else {
@@ -279,7 +277,7 @@ impl Compressor {
 
     fn encode_literal(writer: &mut BitWriter, byte: u8) -> Result<(), ZgfxError> {
         if let Some(token_idx) = Self::find_literal_token(byte) {
-            writer.write_bits_from_slice(TOKEN_TABLE[token_idx].prefix);
+            writer.write_token(&TOKEN_TABLE[token_idx]);
         } else {
             // Null literal: "0" prefix + 8-bit value
             writer.write_bit(false);
@@ -296,7 +294,7 @@ impl Compressor {
     fn encode_match(writer: &mut BitWriter, distance: usize, length: usize) -> Result<(), ZgfxError> {
         let match_token = Self::find_match_token(distance);
 
-        writer.write_bits_from_slice(match_token.prefix);
+        writer.write_token(match_token.token);
 
         let distance_value = distance - match_token.distance_base;
         writer.write_bits(distance_value as u32, match_token.distance_value_size);
@@ -414,7 +412,7 @@ struct Match {
 }
 
 struct MatchToken {
-    prefix: &'static BitSlice<u8, Msb0>,
+    token: &'static Token,
     distance_value_size: usize,
     distance_base: usize,
 }
@@ -454,10 +452,8 @@ impl BitWriter {
         }
     }
 
-    fn write_bits_from_slice(&mut self, bits: &BitSlice<u8, Msb0>) {
-        for bit in bits {
-            self.write_bit(*bit);
-        }
+    fn write_token(&mut self, token: &Token) {
+        self.write_bits(u32::from(token.prefix), usize::from(token.prefix_len));
     }
 
     /// Finalize: append partial byte (if any) and the ZGFX-required
