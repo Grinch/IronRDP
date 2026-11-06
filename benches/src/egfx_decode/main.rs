@@ -30,6 +30,7 @@ use ironrdp::graphics::zgfx::{CompressionMode, Compressor, Decompressor, compres
 use ironrdp::pdu::codecs::rfx::EntropyAlgorithm;
 use ironrdp::pdu::geometry::ExclusiveRectangle;
 use ironrdp_dvc::DvcProcessor as _;
+use ironrdp_egfx::avc444::{Avc444Layout, Yuv444Frame};
 use ironrdp_egfx::client::{GraphicsPipelineClient, GraphicsPipelineHandler};
 use ironrdp_egfx::decode::{DecodedFrame, DecoderResult, H264Decoder, Yuv420Frame};
 use ironrdp_egfx::pdu::{
@@ -469,6 +470,19 @@ fn pipeline(c: &mut Criterion, scenarios: &[Scenario]) {
         .and_then(|s| s.picture.as_ref())
     {
         group.bench_function("picture-clone", |b| b.iter(|| black_box(picture).clone()));
+
+        // The stages of the AVC rows above, each over the whole picture.
+        let rects = [full_screen()];
+        group.throughput(Throughput::Elements(pixels));
+        group.bench_function("yuv420-to-rgba", |b| b.iter(|| black_box(picture).to_rgba()));
+        let mut combined = Yuv444Frame::new(WIDTH, HEIGHT);
+        group.bench_function("yuv444-main-view", |b| {
+            b.iter(|| combined.apply_main_view(black_box(picture), &rects))
+        });
+        group.bench_function("yuv444-auxiliary-view", |b| {
+            b.iter(|| combined.apply_auxiliary_view(Avc444Layout::V1, black_box(picture), &rects))
+        });
+        group.bench_function("yuv444-to-rgba", |b| b.iter(|| black_box(&combined).to_rgba(&rects[0])));
     }
     group.finish();
 }
