@@ -25,6 +25,22 @@ The server opens it and sends its capabilities some time after the connection is
 Read `ActiveStage.DisplayControlState` after each `Process` call: it moves from `Pending` to `Ready` when the capabilities arrive, which is when to send the first resize.
 `Unavailable` means the channel was not requested.
 `ActiveStage.DisplayControlCapabilities` exposes the server's monitor count and area limits once `Ready`.
+`ActiveStage.EncodedMonitorLayout(layout)` sends several monitors at once: fill a `DisplayMonitorLayout` with `AddMonitor(left, top, width, height, isPrimary)`, one primary at (0, 0), the monitors touching and not overlapping.
+
+## Multiple monitors at connection time
+
+`ConfigBuilder.AddMonitor(left, top, right, bottom, isPrimary)` describes one monitor of Client Monitor Data ([MS-RDPBCGR] 2.2.1.3.6), with inclusive bounds: a 1920 x 1080 primary is `(0, 0, 1919, 1079)`.
+The primary is at (0, 0), and the others are placed relative to it, at negative coordinates when left of or above it.
+`Build()` rejects a layout with no or several primaries, a primary away from (0, 0), more than 16 monitors, or a union outside 200 x 200 to 32766 x 32766 pixels.
+It sends the size of that union as the desktop size, in place of the one given to `SetDesktopSize`.
+A server that does not support Extended Client Data Blocks sees the desktop size alone.
+
+## Display scaling
+
+Give the desktop size in the local display's physical pixels and its scale in percent, so the server draws at full resolution and scales its own UI, as mstsc does.
+At connection time, `ConfigBuilder.DesktopScaleFactor` (100 to 500) goes in Client Core Data and, for monitors added with `AddMonitor`, in Client Monitor Extended Data; `Build()` rejects a factor out of range.
+On a resize, `ActiveStage.EncodedResizeWithScale(width, height, scale)` and `DisplayMonitorLayout.AddMonitorWithScale(...)` send it through Display Control.
+The device scale factor (100, 140 or 180) is derived from it.
 
 ## Touch and pen input (MS-RDPEI)
 
@@ -56,3 +72,4 @@ Read `ActiveStage.DisplayControlState` after each `Process` call: it moves from 
 
 [Diplomat]: https://github.com/rust-diplomat/diplomat
 [MS-RDPEDISP]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpedisp
+[MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr

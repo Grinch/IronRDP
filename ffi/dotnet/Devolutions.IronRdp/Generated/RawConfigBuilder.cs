@@ -72,6 +72,15 @@ internal partial struct ConfigBuilder
     [DllImport(DiplomatNativeLib.Name, EntryPoint = "ConfigBuilder_set_dvc_pipe_proxy", CallingConvention = CallingConvention.Cdecl)]
     internal static unsafe extern void SetDvcPipeProxy(ConfigBuilder* handle, DvcPipeProxyConfig* dvcPipeProxy);
 
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ConfigBuilder_set_desktop_scale_factor", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern void SetDesktopScaleFactor(ConfigBuilder* handle, uint scaleFactor);
+
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ConfigBuilder_add_monitor", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern void AddMonitor(ConfigBuilder* handle, int left, int top, int right, int bottom, [MarshalAs(UnmanagedType.U1)] bool isPrimary);
+
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ConfigBuilder_clear_monitors", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern void ClearMonitors(ConfigBuilder* handle);
+
     [DllImport(DiplomatNativeLib.Name, EntryPoint = "ConfigBuilder_build", CallingConvention = CallingConvention.Cdecl)]
     internal static unsafe extern DiplomatResultConfigIronRdpError Build(ConfigBuilder* handle);
 
