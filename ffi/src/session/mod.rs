@@ -212,12 +212,12 @@ pub mod ffi {
             &mut self,
             formats: &ClipboardFormatIterator,
         ) -> Result<Box<VecU8>, Box<IronRdpError>> {
-            let formats = formats.0.clone();
             let clipboard = self
                 .0
                 .get_svc_processor_mut::<ironrdp::cliprdr::CliprdrClient>()
                 .ok_or("clipboard svc processor not found in active stage")?;
 
+            let formats = crate::clipboard::callback::local_formats(clipboard, &formats.0);
             let result = clipboard.initiate_copy(&formats)?;
 
             let frame = self.0.process_svc_processor_messages(result)?;
@@ -225,6 +225,10 @@ pub mod ffi {
             Ok(Box::new(VecU8(frame)))
         }
 
+        /// Requests the remote clipboard's data in `format_id`, returning the frame to send.
+        ///
+        /// With `CallbackCliprdr`, the answer arrives as a `FormatDataResponse` event naming
+        /// `format_id`; the frame is empty when the paste failed at once.
         pub fn initiate_clipboard_paste(
             &mut self,
             format_id: &ClipboardFormatId,
@@ -235,7 +239,7 @@ pub mod ffi {
                 .get_svc_processor_mut::<ironrdp::cliprdr::CliprdrClient>()
                 .ok_or("clipboard svc processor not found in active stage")?;
 
-            let result = clipboard.initiate_paste(format_id)?;
+            let result = crate::clipboard::callback::initiate_paste(clipboard, format_id)?;
 
             let frame = self.0.process_svc_processor_messages(result)?;
 
@@ -282,7 +286,7 @@ pub mod ffi {
                 Message::SendInitiateCopy(formats) => clipboard.initiate_copy(formats)?,
                 Message::SendInitiateFileCopy(files) => clipboard.initiate_file_copy(files.clone())?,
                 Message::SendFormatData(response) => clipboard.submit_format_data(response.clone())?,
-                Message::SendInitiatePaste(format) => clipboard.initiate_paste(*format)?,
+                Message::SendInitiatePaste(format) => crate::clipboard::callback::initiate_paste(clipboard, *format)?,
                 Message::SendFileContentsRequest(request) => clipboard.request_file_contents(request.clone())?,
                 Message::SendFileContentsResponse(response) => clipboard.submit_file_contents(response.clone())?,
                 Message::Error(error) => {

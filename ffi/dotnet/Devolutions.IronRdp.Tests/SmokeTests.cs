@@ -492,6 +492,559 @@ internal static class SmokeTests
             });
         }
 
+        // oracle: property round-trip (each value the test builds reads back as given)
+        yield return ("clipboard formats and data can be built and read", () =>
+        {
+            var unicodeText = ClipboardFormatId.New(13);
+            Equal(13u, unicodeText.Value, "format id");
+
+            var html = ClipboardFormat.NewNamed(ClipboardFormatId.New(0xC004), "HTML Format");
+            True(html.HasName(), "named format has a name");
+            Equal("HTML Format", html.Name, "format name");
+            Equal(0xC004u, html.Id.Value, "named format id");
+            True(!ClipboardFormat.New(unicodeText).HasName(), "standard format has no name");
+
+            var formats = ClipboardFormatIterator.New();
+            True(formats.IsEmpty(), "new list is empty");
+            formats.Push(ClipboardFormat.New(unicodeText));
+            formats.Push(html);
+            Equal(2, (int)formats.Len(), "list length");
+            Equal(13u, formats.Get(0)!.Id.Value, "first format");
+            True(formats.Get(2) == null, "nothing past the end");
+
+            using var text = FormatDataResponse.NewUnicodeText("hé");
+            True(!text.IsError(), "text response is not an error");
+
+            // oracle: spec Standard Clipboard Formats (winuser.h) §CF_UNICODETEXT: UTF-16LE text, a null character ends the data
+            Equal(6, (int)text.DataSize(), "text data size");
+            True(ToArray(text.Data()).SequenceEqual(new byte[] { 0x68, 0x00, 0xe9, 0x00, 0x00, 0x00 }), "UTF-16LE with a null");
+
+            using var raw = FormatDataResponse.NewData(new byte[] { 1, 2, 3 });
+            True(ToArray(raw.Data()).SequenceEqual(new byte[] { 1, 2, 3 }), "raw data");
+
+            using var error = FormatDataResponse.NewError();
+            True(error.IsError(), "error response");
+        });
+
+        // oracle: mutant accepting a zero limit, or a queued data budget smaller than one response
+        yield return ("callback clipboard rejects zero limits", () =>
+        {
+            Throws<IronRdpException>(() => CallbackCliprdr.WithLimits(0, 1, 1));
+            Throws<IronRdpException>(() => CallbackCliprdr.WithLimits(1, 0, 1));
+            Throws<IronRdpException>(() => CallbackCliprdr.WithLimits(1, 1, 0));
+            Throws<IronRdpException>(() => CallbackCliprdr.WithLimits(1, 8, 4));
+            CallbackCliprdr.WithLimits(1, 4, 4).Dispose();
+        });
+
+        // oracle: mutant a poll that ignores its timeout, or a queued event that does not wake a poll already waiting
+        yield return ("callback clipboard poll times out and wakes on an event", () =>
+        {
+            using var clipboard = CallbackCliprdr.New();
+            var (stage, image) = ConnectedStage(8, 4, clipboard: clipboard.BackendFactory());
+            ProcessFrame(stage, image, CliprdrServerPdu(CbClipCaps, 0, ServerClipboardCapabilities));
+            True(clipboard.NextEventTimeout(10) == null, "no event before monitor ready");
+
+            var stopwatch = Stopwatch.StartNew();
+            var poll = Task.Run(() =>
+            {
+                using var clipboardEvent = clipboard.NextEventTimeout(30_000);
+                return clipboardEvent?.EventType;
+            });
+
+            // Give the poll time to start waiting; an event queued before it waits is returned at once anyway.
+            Thread.Sleep(100);
+            ProcessFrame(stage, image, CliprdrServerPdu(CbMonitorReady, 0, Array.Empty<byte>()));
+            Equal<ClipboardEventType?>(ClipboardEventType.FormatListRequested, poll.Result, "event raised on another thread");
+            True(stopwatch.Elapsed < TimeSpan.FromSeconds(15), "woken before the timeout");
+        });
+
+        // oracle: spec MS-RDPECLIP §2.2.2.1.1.1 (CB_USE_LONG_FORMAT_NAMES is 0x02, CB_STREAM_FILECLIP_ENABLED 0x04,
+        // CB_CAN_LOCK_CLIPDATA 0x10); mutant advertising file transfer, which the backend does not serve
+        yield return ("callback clipboard does not advertise file transfer", () =>
+        {
+            using var clipboard = CallbackCliprdr.New();
+            var (stage, image) = ConnectedStage(8, 4, clipboard: clipboard.BackendFactory());
+
+            // A server offering file transfer, so that only the client's own flags can leave it out.
+            byte[] serverCapabilities =
+            {
+                0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x0c, 0x00, 0x02, 0x00, 0x00, 0x00, 0x16, 0x00, 0x00, 0x00,
+            };
+            ProcessFrame(stage, image, CliprdrServerPdu(CbClipCaps, 0, serverCapabilities));
+            ProcessFrame(stage, image, CliprdrServerPdu(CbMonitorReady, 0, Array.Empty<byte>()));
+
+            // The client sends its capabilities with its first format list (MS-RDPECLIP §1.3.2.1).
+            var frame = ToArray(stage.InitiateClipboardCopy(ClipboardFormatIterator.New()));
+            var flags = ClientGeneralCapabilityFlags(frame);
+            Equal(0x02u, flags & 0x02u, "both sides keep long format names, so these are the negotiated flags");
+            Equal(0u, flags & (0x04u | 0x10u), "no STREAM_FILECLIP_ENABLED or CAN_LOCK_CLIPDATA");
+        });
+
+        // oracle: spec MS-RDPECLIP §1.3.2.1 (initialization sequence), §1.3.2.2 (data transfer sequences); the formats
+        // and data are inputs the test chose and asserts were delivered
+        yield return ("callback clipboard reports the server's clipboard flow", () =>
+        {
+            using var clipboard = CallbackCliprdr.New();
+            var (stage, image) = ConnectedStage(8, 4, clipboard: clipboard.BackendFactory());
+
+            ProcessFrame(stage, image, CliprdrServerPdu(CbClipCaps, 0, ServerClipboardCapabilities));
+            ProcessFrame(stage, image, CliprdrServerPdu(CbMonitorReady, 0, Array.Empty<byte>()));
+            Equal(ClipboardEventType.FormatListRequested, NextEventType(clipboard), "monitor ready asks for the local formats");
+
+            var local = ClipboardFormatIterator.New();
+            local.Push(ClipboardFormat.New(ClipboardFormatId.New(13)));
+            True(ToArray(stage.InitiateClipboardCopy(local)).Length > 0, "format list frame");
+
+            ProcessFrame(stage, image, CliprdrServerPdu(CbFormatListResponse, CbResponseOk, Array.Empty<byte>()));
+            Equal(ClipboardEventType.Ready, NextEventType(clipboard), "accepted first list readies the channel");
+            using (var response = clipboard.NextEvent()!)
+            {
+                Equal(ClipboardEventType.FormatListResponse, response.EventType, "format list response");
+                True(response.FormatListAccepted(), "format list accepted");
+            }
+
+            ProcessFrame(stage, image, CliprdrServerPdu(CbFormatList, 0, new byte[] { 0x0d, 0x00, 0x00, 0x00, 0x00, 0x00 }));
+            using (var remote = clipboard.NextEvent()!)
+            {
+                Equal(ClipboardEventType.RemoteFormatList, remote.EventType, "remote format list");
+                var formats = remote.RemoteFormats!;
+                Equal(1, (int)formats.Len(), "remote format count");
+                Equal(13u, formats.Get(0)!.Id.Value, "remote format id");
+            }
+
+            ProcessFrame(stage, image, CliprdrServerPdu(CbFormatDataRequest, 0, new byte[] { 0x0d, 0x00, 0x00, 0x00 }));
+            using (var request = clipboard.NextEvent()!)
+            {
+                Equal(ClipboardEventType.FormatDataRequested, request.EventType, "format data request");
+                Equal(13u, request.RequestedFormat!.Value, "requested format");
+            }
+
+            using (var answer = FormatDataResponse.NewUnicodeText("local"))
+            {
+                True(ToArray(stage.SubmitClipboardFormatData(answer)).Length > 0, "format data response frame");
+            }
+
+            True(ToArray(stage.InitiateClipboardPaste(ClipboardFormatId.New(13))).Length > 0, "format data request frame");
+            var hi = new byte[] { 0x68, 0x00, 0x69, 0x00, 0x00, 0x00 };
+            ProcessFrame(stage, image, CliprdrServerPdu(CbFormatDataResponse, CbResponseOk, hi));
+            using (var data = clipboard.NextEvent()!)
+            {
+                Equal(ClipboardEventType.FormatDataResponse, data.EventType, "format data response");
+                Equal(13u, data.ResponseFormat!.Value, "the format the paste requested");
+                using var formatData = data.FormatData!;
+                True(!formatData.IsError(), "data is not an error");
+                True(ToArray(formatData.Data()).SequenceEqual(hi), "data as the server sent it");
+            }
+
+            True(clipboard.NextEvent() == null, "no further events");
+        });
+
+        // oracle: mutant passing data over the size limit through
+        yield return ("callback clipboard passes oversized data as an error", () =>
+        {
+            using var clipboard = CallbackCliprdr.WithLimits(64, 4, 64);
+            var (stage, image) = ReadyCliprdrStage(clipboard);
+
+            stage.InitiateClipboardPaste(ClipboardFormatId.New(13));
+            ProcessFrame(stage, image, CliprdrServerPdu(CbFormatDataResponse, CbResponseOk, new byte[] { 0x68, 0x00, 0x69, 0x00, 0x00, 0x00 }));
+            using var data = clipboard.NextEvent()!;
+            Equal(ClipboardEventType.FormatDataResponse, data.EventType, "format data response");
+            using var formatData = data.FormatData!;
+            True(formatData.IsError(), "oversized data becomes an error");
+        });
+
+        // oracle: mutant queueing past the limit, dropping the oldest event instead of the newest, not counting a dropped
+        // event, or keeping a remote format list a newer one superseded
+        yield return ("callback clipboard bounds its queue and keeps the latest remote formats", () =>
+        {
+            using var clipboard = CallbackCliprdr.WithLimits(2, 1024, 4096);
+            var (stage, image) = ReadyCliprdrStage(clipboard);
+            var droppedBefore = clipboard.DroppedEventCount;
+
+            ProcessFrame(stage, image, CliprdrServerPdu(CbFormatList, 0, new byte[] { 0x01, 0x00, 0x00, 0x00, 0x00, 0x00 }));
+            ProcessFrame(stage, image, CliprdrServerPdu(CbFormatList, 0, new byte[] { 0x0d, 0x00, 0x00, 0x00, 0x00, 0x00 }));
+            ProcessFrame(stage, image, CliprdrServerPdu(CbFormatDataRequest, 0, new byte[] { 0x0d, 0x00, 0x00, 0x00 }));
+            ProcessFrame(stage, image, CliprdrServerPdu(CbFormatDataRequest, 0, new byte[] { 0x01, 0x00, 0x00, 0x00 }));
+
+            Equal(droppedBefore + 1, clipboard.DroppedEventCount, "one event over the limit");
+            using (var remote = clipboard.NextEvent()!)
+            {
+                Equal(ClipboardEventType.RemoteFormatList, remote.EventType, "one remote format list");
+                Equal(13u, remote.RemoteFormats!.Get(0)!.Id.Value, "the latest list");
+            }
+
+            using (var request = clipboard.NextEvent()!)
+            {
+                Equal(13u, request.RequestedFormat!.Value, "the first request kept");
+            }
+
+            True(clipboard.NextEvent() == null, "the second request was dropped");
+        });
+
+        // oracle: spec MS-RDPECLIP §2.2.3.2 (CB_RESPONSE_FAIL rejects the format list)
+        yield return ("callback clipboard reports a rejected format list", () =>
+        {
+            using var clipboard = CallbackCliprdr.New();
+            var (stage, image) = ReadyCliprdrStage(clipboard);
+
+            stage.InitiateClipboardCopy(ClipboardFormatIterator.New());
+            ProcessFrame(stage, image, CliprdrServerPdu(CbFormatListResponse, CbResponseFail, Array.Empty<byte>()));
+            using var response = clipboard.NextEvent()!;
+            Equal(ClipboardEventType.FormatListResponse, response.EventType, "format list response");
+            True(!response.FormatListAccepted(), "format list rejected");
+        });
+
+        // oracle: spec MS-RDPECLIP §2.2.4.6 (Lock Clipboard Data PDU), §2.2.4.7 (Unlock Clipboard Data PDU); the clipDataId
+        // is the input the test chose and asserts was delivered
+        yield return ("callback clipboard reports lock and unlock with their clipDataId", () =>
+        {
+            using var clipboard = CallbackCliprdr.New();
+            var (stage, image) = ReadyCliprdrStage(clipboard);
+
+            ProcessFrame(stage, image, CliprdrServerPdu(CbLockClipdata, 0, new byte[] { 0x2a, 0x00, 0x00, 0x00 }));
+            ProcessFrame(stage, image, CliprdrServerPdu(CbUnlockClipdata, 0, new byte[] { 0x2a, 0x00, 0x00, 0x00 }));
+            using (var locked = clipboard.NextEvent()!)
+            {
+                Equal(ClipboardEventType.Lock, locked.EventType, "lock");
+                Equal(42u, locked.LockId(), "locked clipDataId");
+            }
+
+            using (var unlocked = clipboard.NextEvent()!)
+            {
+                Equal(ClipboardEventType.Unlock, unlocked.EventType, "unlock");
+                Equal(42u, unlocked.LockId(), "unlocked clipDataId");
+            }
+        });
+
+        // oracle: spec MS-RDPECLIP §2.2.5.2 (a Format Data Response PDU names no format), §3.1.5.4.3 (one response is
+        // sent for each Format Data Request PDU); mutant pairing a response with the newest request
+        yield return ("callback clipboard names the format each response answers", () =>
+        {
+            using var clipboard = CallbackCliprdr.New();
+            var (stage, image) = ReadyCliprdrStage(clipboard);
+
+            stage.InitiateClipboardPaste(ClipboardFormatId.New(13));
+            stage.InitiateClipboardPaste(ClipboardFormatId.New(1));
+            var unicode = new byte[] { 0x68, 0x00, 0x69, 0x00, 0x00, 0x00 };
+            var ansi = new byte[] { 0x68, 0x69, 0x00 };
+            ProcessFrame(stage, image, CliprdrServerPdu(CbFormatDataResponse, CbResponseOk, unicode));
+            ProcessFrame(stage, image, CliprdrServerPdu(CbFormatDataResponse, CbResponseOk, ansi));
+
+            using (var first = clipboard.NextEvent()!)
+            {
+                Equal(13u, first.ResponseFormat!.Value, "the first response answers the first paste");
+                using var data = first.FormatData!;
+                True(ToArray(data.Data()).SequenceEqual(unicode), "first data");
+            }
+
+            using (var second = clipboard.NextEvent()!)
+            {
+                Equal(1u, second.ResponseFormat!.Value, "the second response answers the second paste");
+                using var data = second.FormatData!;
+                True(ToArray(data.Data()).SequenceEqual(ansi), "second data");
+            }
+        });
+
+        // oracle: rustdoc of Cliprdr::initiate_paste and MAX_PENDING_FORMAT_DATA_REQUESTS in ironrdp-cliprdr (past 64
+        // unanswered requests a paste is not sent and fails at once); mutant pairing that failure with the oldest paste
+        yield return ("callback clipboard answers a paste the channel refuses at once", () =>
+        {
+            using var clipboard = CallbackCliprdr.New();
+            var (stage, image) = ReadyCliprdrStage(clipboard);
+
+            for (int i = 0; i < 64; i++)
+            {
+                stage.InitiateClipboardPaste(ClipboardFormatId.New(13));
+            }
+
+            Equal(0, ToArray(stage.InitiateClipboardPaste(ClipboardFormatId.New(1))).Length, "the 65th paste is not sent");
+            using (var refused = clipboard.NextEvent()!)
+            {
+                Equal(1u, refused.ResponseFormat!.Value, "the refused paste is answered");
+                using var data = refused.FormatData!;
+                True(data.IsError(), "with an error");
+            }
+
+            ProcessFrame(stage, image, CliprdrServerPdu(CbFormatDataResponse, CbResponseOk, new byte[] { 0x00, 0x00 }));
+            using var answer = clipboard.NextEvent()!;
+            Equal(13u, answer.ResponseFormat!.Value, "the remote's answer goes to the first paste sent");
+        });
+
+        // oracle: mutant dropping the response to a paste when the queue is full, which leaves the embedder waiting
+        yield return ("callback clipboard keeps the response to a paste when its queue is full", () =>
+        {
+            using var clipboard = CallbackCliprdr.WithLimits(1, 1024, 4096);
+            var (stage, image) = ReadyCliprdrStage(clipboard);
+            var droppedBefore = clipboard.DroppedEventCount;
+
+            stage.InitiateClipboardPaste(ClipboardFormatId.New(13));
+            ProcessFrame(stage, image, CliprdrServerPdu(CbFormatList, 0, new byte[] { 0x0d, 0x00, 0x00, 0x00, 0x00, 0x00 }));
+            ProcessFrame(stage, image, CliprdrServerPdu(CbFormatDataRequest, 0, new byte[] { 0x0d, 0x00, 0x00, 0x00 }));
+            ProcessFrame(stage, image, CliprdrServerPdu(CbFormatDataResponse, CbResponseOk, new byte[] { 0x00, 0x00 }));
+
+            Equal(droppedBefore + 1, clipboard.DroppedEventCount, "only the remote request was dropped");
+            Equal(ClipboardEventType.RemoteFormatList, NextEventType(clipboard), "the event that filled the queue");
+            using (var data = clipboard.NextEvent()!)
+            {
+                Equal(ClipboardEventType.FormatDataResponse, data.EventType, "the response is kept");
+                Equal(13u, data.ResponseFormat!.Value, "response format");
+            }
+
+            True(clipboard.NextEvent() == null, "no further events");
+        });
+
+        // oracle: mutant reporting a response that answers no paste of this session
+        yield return ("callback clipboard ignores a response nothing requested", () =>
+        {
+            using var clipboard = CallbackCliprdr.New();
+            var (stage, image) = ReadyCliprdrStage(clipboard);
+
+            ProcessFrame(stage, image, CliprdrServerPdu(CbFormatDataResponse, CbResponseOk, new byte[] { 0x00, 0x00 }));
+            True(clipboard.NextEvent() == null, "no event");
+        });
+
+        // oracle: spec MS-RDPECLIP §2.2.2.1.1.1 (file streams need CB_STREAM_FILECLIP_ENABLED, which the backend does
+        // not advertise); mutant sending the request, whose response the channel keeps as a file list and never reports
+        yield return ("callback clipboard fails a paste of the file list at once", () =>
+        {
+            using var clipboard = CallbackCliprdr.New();
+            var (stage, image) = ReadyCliprdrStage(clipboard);
+
+            ProcessFrame(stage, image, CliprdrServerPdu(CbFormatList, 0, LongFormatNames((0xc0ff, "FileGroupDescriptorW"))));
+            Equal(ClipboardEventType.RemoteFormatList, NextEventType(clipboard), "remote format list");
+
+            Equal(0, ToArray(stage.InitiateClipboardPaste(ClipboardFormatId.New(0xc0ff))).Length, "nothing sent");
+            using var data = clipboard.NextEvent()!;
+            Equal(ClipboardEventType.FormatDataResponse, data.EventType, "the paste is answered");
+            Equal(0xc0ffu, data.ResponseFormat!.Value, "response format");
+            using var formatData = data.FormatData!;
+            True(formatData.IsError(), "with an error");
+        });
+
+        // oracle: spec MS-RDPECLIP §2.2.2.1.1.1 (CB_STREAM_FILECLIP_ENABLED 0x04, CB_CAN_LOCK_CLIPDATA 0x10); mutant
+        // advertising nothing when enabled, or reporting file transfer the server does not offer
+        yield return ("callback clipboard advertises file transfer when enabled", () =>
+        {
+            using var clipboard = CallbackCliprdr.New();
+            clipboard.EnableFileTransfer();
+            var (stage, image) = ConnectedStage(8, 4, clipboard: clipboard.BackendFactory());
+
+            ProcessFrame(stage, image, CliprdrServerPdu(CbClipCaps, 0, FileClipboardCapabilities));
+            ProcessFrame(stage, image, CliprdrServerPdu(CbMonitorReady, 0, Array.Empty<byte>()));
+            var flags = ClientGeneralCapabilityFlags(ToArray(stage.InitiateClipboardCopy(ClipboardFormatIterator.New())));
+            Equal(0x14u, flags & 0x14u, "STREAM_FILECLIP_ENABLED and CAN_LOCK_CLIPDATA");
+            True(clipboard.FileTransferNegotiated, "negotiated with a server offering it");
+
+            using var plain = CallbackCliprdr.New();
+            plain.EnableFileTransfer();
+            ReadyCliprdrStage(plain);
+            True(!plain.FileTransferNegotiated, "not negotiated with a server without it");
+        });
+
+        // oracle: spec MS-RDPECLIP §2.2.5.2.3 (Packed File List), §2.2.5.3 (File Contents Request PDU), §2.2.5.4 (File
+        // Contents Response PDU); the file and its bytes are inputs the test chose and asserts were delivered
+        yield return ("callback clipboard reports the remote's files and fetches their bytes", () =>
+        {
+            using var clipboard = CallbackCliprdr.New();
+            clipboard.EnableFileTransfer();
+            var (stage, image) = ReadyCliprdrStage(clipboard, FileClipboardCapabilities);
+
+            ProcessFrame(stage, image, CliprdrServerPdu(CbFormatList, 0, LongFormatNames((0xc0ff, "FileGroupDescriptorW"))));
+            Equal(ClipboardEventType.RemoteFormatList, NextEventType(clipboard), "remote format list");
+
+            True(ToArray(stage.InitiateClipboardPaste(ClipboardFormatId.New(0xc0ff))).Length > 0, "the file list is asked for");
+            ProcessFrame(stage, image, CliprdrServerPdu(CbFormatDataResponse, CbResponseOk, PackedFileList("a.txt", 5)));
+            using (var list = clipboard.NextEvent()!)
+            {
+                Equal(ClipboardEventType.RemoteFileList, list.EventType, "the paste is answered with the files");
+                Equal(0xc0ffu, list.ResponseFormat!.Value, "the format the paste requested");
+                True(list.HasRemoteFilesLockId(), "the list is locked");
+                using var files = list.RemoteFiles!;
+                Equal(1, (int)files.Len(), "file count");
+                using var file = files.Get(0)!;
+                Equal("a.txt", file.GetName(), "file name");
+                Equal(5ul, file.GetSize(), "file size");
+                True(!file.IsDirectory(), "a file");
+            }
+
+            using (var request = ClipboardMessage.NewFileContentsRequest(7, 0, false, 0, 5, false, 0))
+            {
+                var frame = ToArray(stage.SubmitClipboardMessage(request));
+                byte[] body = { 0x07, 0, 0, 0, 0, 0, 0, 0, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x05, 0, 0, 0 };
+                True(Contains(frame, body), "a range request of file 0");
+            }
+
+            var hello = "hello"u8.ToArray();
+            ProcessFrame(stage, image, CliprdrServerPdu(CbFileContentsResponse, CbResponseOk, new byte[] { 0x07, 0, 0, 0 }.Concat(hello).ToArray()));
+            using (var response = clipboard.NextEvent()!)
+            {
+                Equal(ClipboardEventType.FileContentsResponse, response.EventType, "file contents response");
+                var contents = response.FileContentsResponse!;
+                Equal(7u, contents.StreamId(), "stream id");
+                True(!contents.IsError(), "not an error");
+                True(ToArray(contents.Data()).SequenceEqual(hello), "the bytes as the server sent them");
+            }
+
+            True(clipboard.NextEvent() == null, "no further events");
+        });
+
+        // oracle: spec MS-RDPECLIP §2.2.5.3 (File Contents Request PDU), §2.2.5.4 (File Contents Response PDU); mutant
+        // dropping the remote's request, or answering it with other bytes than the embedder gave
+        yield return ("callback clipboard passes the remote's requests for local files", () =>
+        {
+            using var clipboard = CallbackCliprdr.New();
+            clipboard.EnableFileTransfer();
+            var (stage, image) = ReadyCliprdrStage(clipboard, FileClipboardCapabilities);
+
+            using (var files = FileDescriptorList.New())
+            {
+                using var file = FileDescriptor.New("b.txt", "", 3, false, 0);
+                files.Push(file);
+                using var copy = ClipboardMessage.NewInitiateFileCopy(files);
+                True(ToArray(stage.SubmitClipboardMessage(copy)).Length > 0, "the files are offered");
+            }
+
+            byte[] range = { 0x09, 0, 0, 0, 0, 0, 0, 0, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x03, 0, 0, 0 };
+            ProcessFrame(stage, image, CliprdrServerPdu(CbFileContentsRequest, 0, range));
+            using (var requested = clipboard.NextEvent()!)
+            {
+                Equal(ClipboardEventType.FileContentsRequested, requested.EventType, "file contents requested");
+                var request = requested.FileContentsRequest!;
+                Equal(9u, request.StreamId(), "stream id");
+                Equal(0, request.Index(), "file index");
+                True(request.IsRangeRequest(), "a range request");
+                Equal(3u, request.RequestedSize(), "requested size");
+            }
+
+            using var answer = ClipboardMessage.NewFileContentsData(9, "abc"u8.ToArray());
+            var frame = ToArray(stage.SubmitClipboardMessage(answer));
+            True(Contains(frame, new byte[] { 0x09, 0, 0, 0, 0x61, 0x62, 0x63 }), "the bytes are sent for the stream");
+        });
+
+        // oracle: mutant keeping the events of an earlier connection, or letting its channel queue more
+        yield return ("callback clipboard forgets an earlier connection", () =>
+        {
+            using var clipboard = CallbackCliprdr.New();
+            var (oldStage, oldImage) = ReadyCliprdrStage(clipboard);
+            oldStage.InitiateClipboardPaste(ClipboardFormatId.New(13));
+            ProcessFrame(oldStage, oldImage, CliprdrServerPdu(CbFormatList, 0, new byte[] { 0x0d, 0x00, 0x00, 0x00, 0x00, 0x00 }));
+
+            var (stage, image) = ConnectedStage(8, 4, clipboard: clipboard.BackendFactory());
+            True(clipboard.NextEvent() == null, "the earlier connection's events are gone");
+
+            ProcessFrame(oldStage, oldImage, CliprdrServerPdu(CbFormatDataResponse, CbResponseOk, new byte[] { 0x00, 0x00 }));
+            ProcessFrame(oldStage, oldImage, CliprdrServerPdu(CbFormatList, 0, new byte[] { 0x01, 0x00, 0x00, 0x00, 0x00, 0x00 }));
+            True(clipboard.NextEvent() == null, "the earlier connection queues nothing more");
+
+            ProcessFrame(stage, image, CliprdrServerPdu(CbClipCaps, 0, ServerClipboardCapabilities));
+            ProcessFrame(stage, image, CliprdrServerPdu(CbMonitorReady, 0, Array.Empty<byte>()));
+            Equal(ClipboardEventType.FormatListRequested, NextEventType(clipboard), "the new connection's events arrive");
+        });
+
+        // oracle: mutant not bounding the queued data, or not releasing the budget when an event is taken
+        yield return ("callback clipboard bounds its queued data", () =>
+        {
+            using var clipboard = CallbackCliprdr.WithLimits(64, 6, 8);
+            var (stage, image) = ReadyCliprdrStage(clipboard);
+            var six = new byte[] { 0x61, 0x00, 0x62, 0x00, 0x00, 0x00 };
+
+            stage.InitiateClipboardPaste(ClipboardFormatId.New(13));
+            stage.InitiateClipboardPaste(ClipboardFormatId.New(13));
+            ProcessFrame(stage, image, CliprdrServerPdu(CbFormatDataResponse, CbResponseOk, six));
+            ProcessFrame(stage, image, CliprdrServerPdu(CbFormatDataResponse, CbResponseOk, six));
+            using (var first = clipboard.NextEvent()!)
+            using (var data = first.FormatData!)
+            {
+                True(!data.IsError(), "the first response fits the budget");
+            }
+
+            using (var second = clipboard.NextEvent()!)
+            using (var data = second.FormatData!)
+            {
+                True(data.IsError(), "the second response would exceed it");
+            }
+
+            stage.InitiateClipboardPaste(ClipboardFormatId.New(13));
+            ProcessFrame(stage, image, CliprdrServerPdu(CbFormatDataResponse, CbResponseOk, six));
+            using (var third = clipboard.NextEvent()!)
+            using (var data = third.FormatData!)
+            {
+                True(!data.IsError(), "taking events frees the budget");
+            }
+        });
+
+        // oracle: mutant counting only the drops of the latest overflow
+        yield return ("callback clipboard counts the drops of every overflow", () =>
+        {
+            using var clipboard = CallbackCliprdr.WithLimits(1, 1024, 4096);
+            var (stage, image) = ReadyCliprdrStage(clipboard);
+            var droppedBefore = clipboard.DroppedEventCount;
+            var request = CliprdrServerPdu(CbFormatDataRequest, 0, new byte[] { 0x0d, 0x00, 0x00, 0x00 });
+
+            ProcessFrame(stage, image, request);
+            ProcessFrame(stage, image, request);
+            ProcessFrame(stage, image, request);
+            Equal(droppedBefore + 2, clipboard.DroppedEventCount, "first overflow");
+            clipboard.NextEvent()!.Dispose();
+
+            ProcessFrame(stage, image, request);
+            ProcessFrame(stage, image, request);
+            Equal(droppedBefore + 3, clipboard.DroppedEventCount, "second overflow");
+        });
+
+        // oracle: spec Unicode Standard §23.1 (Cc control characters) and DerivedCoreProperties.txt
+        // Default_Ignorable_Code_Point (U+200B ZERO WIDTH SPACE, U+202E RIGHT-TO-LEFT OVERRIDE): characters that do not
+        // show in a format name
+        yield return ("clipboard format names reject hidden characters", () =>
+        {
+            Throws<IronRdpException>(() => ClipboardFormat.NewNamed(ClipboardFormatId.New(0xc001), ""));
+            Throws<IronRdpException>(() => ClipboardFormat.NewNamed(ClipboardFormatId.New(0xc001), "Rich\u0007Text"));
+            Throws<IronRdpException>(() => ClipboardFormat.NewNamed(ClipboardFormatId.New(0xc001), "Rich\0Text"));
+            Throws<IronRdpException>(() => ClipboardFormat.NewNamed(ClipboardFormatId.New(0xc001), "Rich​Text"));
+            Throws<IronRdpException>(() => ClipboardFormat.NewNamed(ClipboardFormatId.New(0xc001), "‮txeT hciR"));
+            Equal("Rich Text Format", ClipboardFormat.NewNamed(ClipboardFormatId.New(0xc001), "Rich Text Format").Name, "plain name");
+        });
+
+        // oracle: same sources as above, for names the remote sends
+        yield return ("callback clipboard leaves out remote formats with hidden characters", () =>
+        {
+            using var clipboard = CallbackCliprdr.New();
+            var (stage, image) = ReadyCliprdrStage(clipboard);
+
+            ProcessFrame(stage, image, CliprdrServerPdu(CbFormatList, 0, LongFormatNames(
+                (13, ""), (0xc001, "Rich\u0007Text"), (0xc002, "Rich​Text"), (0xc003, "HTML Format"))));
+            using var remote = clipboard.NextEvent()!;
+            var formats = remote.RemoteFormats!;
+            Equal(2, (int)formats.Len(), "two formats kept");
+            Equal(13u, formats.Get(0)!.Id.Value, "unnamed format");
+            Equal(0xc003u, formats.Get(1)!.Id.Value, "plain name");
+        });
+
+        // oracle: spec MS-RDPECLIP §2.2.3.1.1.1 (a short format name is a 32-byte block, 16 Unicode characters with the
+        // null; a name that does not fit is truncated)
+        yield return ("callback clipboard truncates a long name to a short format name", () =>
+        {
+            using var clipboard = CallbackCliprdr.New();
+            var (stage, image) = ConnectedStage(8, 4, clipboard: clipboard.BackendFactory());
+            byte[] shortNamesOnly =
+            {
+                0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x0c, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            };
+            ProcessFrame(stage, image, CliprdrServerPdu(CbClipCaps, 0, shortNamesOnly));
+            ProcessFrame(stage, image, CliprdrServerPdu(CbMonitorReady, 0, Array.Empty<byte>()));
+
+            var formats = ClipboardFormatIterator.New();
+            formats.Push(ClipboardFormat.NewNamed(ClipboardFormatId.New(0xc004), "HTML Format Extended"));
+            var frame = ToArray(stage.InitiateClipboardCopy(formats));
+
+            var entry = new List<byte> { 0x04, 0xc0, 0x00, 0x00 };
+            entry.AddRange(System.Text.Encoding.Unicode.GetBytes("HTML Format Ext"));
+            entry.AddRange(new byte[] { 0x00, 0x00 });
+            var formatList = new List<byte> { 0x02, 0x00, 0x00, 0x00, 0x24, 0x00, 0x00, 0x00 };
+            formatList.AddRange(entry);
+            True(Contains(frame, formatList.ToArray()), "one 36-byte format list entry with the name truncated");
+        });
+
         // oracle: spec MS-RDPEI §3.2.5.1 (the client sends CS_READY only after SC_READY) and the rustdoc of
         // ActiveStage::encode_rdpei_touch (a refused encode leaves the frames pending)
         yield return ("rdpei touch is refused before the channel is ready", () =>
@@ -968,10 +1521,150 @@ internal static class SmokeTests
         },
     };
 
-    private static (ActiveStage Stage, DecodedImage Image) ConnectedStage(ushort width, ushort height, bool displayControl = false, bool rdpei = false)
+    // MS-RDPECLIP §2.2.1 msgType and msgFlags values.
+    private const ushort CbMonitorReady = 0x0001;
+    private const ushort CbFormatList = 0x0002;
+    private const ushort CbFormatListResponse = 0x0003;
+    private const ushort CbFormatDataRequest = 0x0004;
+    private const ushort CbFormatDataResponse = 0x0005;
+    private const ushort CbClipCaps = 0x0007;
+    private const ushort CbFileContentsRequest = 0x0008;
+    private const ushort CbFileContentsResponse = 0x0009;
+    private const ushort CbLockClipdata = 0x000a;
+    private const ushort CbUnlockClipdata = 0x000b;
+    private const ushort CbResponseOk = 0x0001;
+    private const ushort CbResponseFail = 0x0002;
+
+    // One General Capability Set, version 2, CB_USE_LONG_FORMAT_NAMES (MS-RDPECLIP §2.2.2.1).
+    private static readonly byte[] ServerClipboardCapabilities =
+    {
+        0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x0c, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
+    };
+
+    // The same, adding CB_STREAM_FILECLIP_ENABLED, CB_FILECLIP_NO_FILE_PATHS and CB_CAN_LOCK_CLIPDATA.
+    private static readonly byte[] FileClipboardCapabilities =
+    {
+        0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x0c, 0x00, 0x02, 0x00, 0x00, 0x00, 0x1e, 0x00, 0x00, 0x00,
+    };
+
+    // A CLIPRDR PDU (MS-RDPECLIP §2.2.1) from the server on static channel 1004, in one Virtual Channel PDU
+    // with CHANNEL_FLAG_FIRST | CHANNEL_FLAG_LAST (MS-RDPBCGR §2.2.6.1) inside an MCS Send Data Indication.
+    private static byte[] CliprdrServerPdu(ushort msgType, ushort msgFlags, byte[] data)
+    {
+        var channelData = new List<byte>();
+        channelData.AddRange(BitConverter.GetBytes(8 + data.Length));
+        channelData.AddRange(BitConverter.GetBytes(3));
+        channelData.AddRange(BitConverter.GetBytes(msgType));
+        channelData.AddRange(BitConverter.GetBytes(msgFlags));
+        channelData.AddRange(BitConverter.GetBytes(data.Length));
+        channelData.AddRange(data);
+
+        int length = channelData.Count;
+        byte[] perLength = length < 0x80 ? new[] { (byte)length } : new[] { (byte)(0x80 | length >> 8), (byte)length };
+        var mcs = new List<byte> { 0x02, 0xf0, 0x80, 0x68, 0x00, 0x01, 0x03, 0xec, 0x70 };
+        mcs.AddRange(perLength);
+        mcs.AddRange(channelData);
+
+        int total = 4 + mcs.Count;
+        var frame = new List<byte> { 0x03, 0x00, (byte)(total >> 8), (byte)total };
+        frame.AddRange(mcs);
+        return frame.ToArray();
+    }
+
+    // The generalFlags of the client's Clipboard Capabilities PDU (MS-RDPECLIP §2.2.2.1) in a frame: its CLIPRDR_HEADER
+    // with a 16-byte body, one capability set of type CB_CAPSTYPE_GENERAL and length 12, then version and generalFlags.
+    private static uint ClientGeneralCapabilityFlags(byte[] frame)
+    {
+        byte[] header = { 0x07, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x0c, 0x00 };
+        for (int i = 0; i + header.Length + 8 <= frame.Length; i++)
+        {
+            if (frame.AsSpan(i, header.Length).SequenceEqual(header))
+            {
+                return BitConverter.ToUInt32(frame, i + header.Length + 4);
+            }
+        }
+
+        throw new InvalidOperationException("no Clipboard Capabilities PDU in the frame");
+    }
+
+    // A Packed File List (MS-RDPECLIP §2.2.5.2.3) of one file: cItems, then a CLIPRDR_FILEDESCRIPTOR with FD_FILESIZE,
+    // its size and its name in a 520-byte UTF-16LE field.
+    private static byte[] PackedFileList(string name, uint size)
+    {
+        var bytes = new List<byte>();
+        bytes.AddRange(BitConverter.GetBytes(1u));
+        bytes.AddRange(BitConverter.GetBytes(0x40u));
+        bytes.AddRange(new byte[32 + 4 + 16 + 8]);
+        bytes.AddRange(BitConverter.GetBytes(0u));
+        bytes.AddRange(BitConverter.GetBytes(size));
+        var fileName = new byte[520];
+        System.Text.Encoding.Unicode.GetBytes(name).CopyTo(fileName, 0);
+        bytes.AddRange(fileName);
+        return bytes.ToArray();
+    }
+
+    // Long Format Names (MS-RDPECLIP §2.2.3.1.2.1): each a formatId, then the name in UTF-16LE ending in a null.
+    private static byte[] LongFormatNames(params (uint Id, string Name)[] formats)
+    {
+        var bytes = new List<byte>();
+        foreach (var (id, name) in formats)
+        {
+            bytes.AddRange(BitConverter.GetBytes(id));
+            bytes.AddRange(System.Text.Encoding.Unicode.GetBytes(name));
+            bytes.AddRange(new byte[] { 0x00, 0x00 });
+        }
+
+        return bytes.ToArray();
+    }
+
+    private static bool Contains(byte[] haystack, byte[] needle)
+    {
+        for (int i = 0; i + needle.Length <= haystack.Length; i++)
+        {
+            if (haystack.AsSpan(i, needle.Length).SequenceEqual(needle))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static ClipboardEventType NextEventType(CallbackCliprdr clipboard)
+    {
+        using var clipboardEvent = clipboard.NextEvent() ?? throw new InvalidOperationException("no clipboard event");
+        return clipboardEvent.EventType;
+    }
+
+    // Connects with the clipboard channel attached, plays the server side of its initialization, and
+    // drains the events it raised.
+    private static (ActiveStage Stage, DecodedImage Image) ReadyCliprdrStage(CallbackCliprdr clipboard, byte[]? serverCapabilities = null)
+    {
+        var (stage, image) = ConnectedStage(8, 4, clipboard: clipboard.BackendFactory());
+        ProcessFrame(stage, image, CliprdrServerPdu(CbClipCaps, 0, serverCapabilities ?? ServerClipboardCapabilities));
+        ProcessFrame(stage, image, CliprdrServerPdu(CbMonitorReady, 0, Array.Empty<byte>()));
+        stage.InitiateClipboardCopy(ClipboardFormatIterator.New());
+        ProcessFrame(stage, image, CliprdrServerPdu(CbFormatListResponse, CbResponseOk, Array.Empty<byte>()));
+        while (clipboard.NextEvent() is { } drained)
+        {
+            drained.Dispose();
+        }
+
+        return (stage, image);
+    }
+
+    private static (ActiveStage Stage, DecodedImage Image) ConnectedStage(ushort width, ushort height, bool displayControl = false, bool rdpei = false,
+        CliprdrBackendFactory? clipboard = null)
     {
         var connector = ClientConnector.New(TlsConfig(), "127.0.0.1:33890");
         var serverPdus = HandshakeServerPdus.ToArray();
+        if (clipboard is not null)
+        {
+            // The clipboard is the only static channel, so the Connect Response's one channel is its own.
+            connector.AttachStaticCliprdr(clipboard.BuildCliprdr());
+            serverPdus[1] = McsConnectResponseWithDrdynvc;
+        }
+
         if (displayControl)
         {
             connector.WithDynamicChannelDisplayControl();

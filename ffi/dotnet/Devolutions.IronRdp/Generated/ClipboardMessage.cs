@@ -221,6 +221,80 @@ public partial class ClipboardMessage: IDisposable
         }
     }
 
+    /// <returns>
+    /// A <c>ClipboardMessage</c> allocated on Rust side.
+    /// </returns>
+    public static ClipboardMessage NewInitiateFileCopy(FileDescriptorList files)
+    {
+        unsafe
+        {
+            if (files == null) throw new ArgumentNullException(nameof(files));
+            BorrowLease<Raw.FileDescriptorList>? filesLease = null;
+            try
+            {
+                filesLease = files._diplomatHandle.Lease(BorrowKind.Shared);
+                Raw.ClipboardMessage* result = Raw.ClipboardMessage.NewInitiateFileCopy(filesLease!.Ptr);
+                return new ClipboardMessage(result);
+            }
+            finally
+            {
+                filesLease?.Release();
+            }
+        }
+    }
+
+    /// <returns>
+    /// A <c>ClipboardMessage</c> allocated on Rust side.
+    /// </returns>
+    public static ClipboardMessage NewFileContentsRequest(uint streamId, int index, bool sizeRequest, ulong position, uint requestedSize, bool hasDataId, uint dataId)
+    {
+        unsafe
+        {
+            Raw.ClipboardMessage* result = Raw.ClipboardMessage.NewFileContentsRequest(streamId, index, sizeRequest, position, requestedSize, hasDataId, dataId);
+            return new ClipboardMessage(result);
+        }
+    }
+
+    /// <returns>
+    /// A <c>ClipboardMessage</c> allocated on Rust side.
+    /// </returns>
+    public static ClipboardMessage NewFileContentsSize(uint streamId, ulong size)
+    {
+        unsafe
+        {
+            Raw.ClipboardMessage* result = Raw.ClipboardMessage.NewFileContentsSize(streamId, size);
+            return new ClipboardMessage(result);
+        }
+    }
+
+    /// <returns>
+    /// A <c>ClipboardMessage</c> allocated on Rust side.
+    /// </returns>
+    public static ClipboardMessage NewFileContentsData(uint streamId, byte[] data)
+    {
+        unsafe
+        {
+            if (data == null) throw new ArgumentNullException(nameof(data));
+            fixed (byte* dataPtr = data)
+            {
+                Raw.ClipboardMessage* result = Raw.ClipboardMessage.NewFileContentsData(streamId, new DiplomatSliceU8 { Ptr = dataPtr, Len = (nuint)data.Length });
+                return new ClipboardMessage(result);
+            }
+        }
+    }
+
+    /// <returns>
+    /// A <c>ClipboardMessage</c> allocated on Rust side.
+    /// </returns>
+    public static ClipboardMessage NewFileContentsError(uint streamId)
+    {
+        unsafe
+        {
+            Raw.ClipboardMessage* result = Raw.ClipboardMessage.NewFileContentsError(streamId);
+            return new ClipboardMessage(result);
+        }
+    }
+
     private void Cleanup()
     {
         unsafe
