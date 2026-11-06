@@ -474,6 +474,34 @@ fn factory_channel_processor_is_dropped_on_close() {
     );
 }
 
+// oracle: mutant ignoring a factory registered on a client that already exists
+#[test]
+fn factory_attached_to_an_existing_client_opens_its_channel() {
+    let dropped = Arc::new(AtomicBool::new(false));
+    let mut client = DrdynvcClient::new();
+    client.attach_dynamic_channel_factory("counted", {
+        let dropped = Arc::clone(&dropped);
+        move || DropFlagDvc(Arc::clone(&dropped))
+    });
+    let create = encode_vec(&DrdynvcServerPdu::Create(CreateRequestPdu::new(
+        1,
+        "counted".to_owned(),
+    )))
+    .expect("Create Request should encode");
+    let close = encode_vec(&DrdynvcServerPdu::Close(ClosePdu::new(1))).expect("Close should encode");
+
+    client.process(&create).expect("Create Request should be processed");
+    assert!(
+        client.get_dvc_by_channel_id::<DropFlagDvc>(1).is_some(),
+        "the channel opened with a processor from the factory"
+    );
+    client.process(&close).expect("Close should be processed");
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "the factory made the processor the channel opened with"
+    );
+}
+
 /// Opens its channel only while available, like a camera listener whose device was withdrawn.
 struct WithdrawableListener(Arc<AtomicBool>);
 
