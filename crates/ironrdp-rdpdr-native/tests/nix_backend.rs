@@ -1710,6 +1710,49 @@ fn query_standard_information(backend: &mut NixRdpdrBackend, file_id: u32) -> Fi
     information
 }
 
+#[test]
+fn each_drive_is_served_from_its_own_folder() {
+    let fixture = Fixture::new();
+    let second = fixture.sandbox.join("second");
+    std::fs::create_dir(&second).expect("create second share");
+    std::fs::write(second.join("doc.txt"), b"second").expect("write file");
+    let mut backend = fixture
+        .backend()
+        .with_drive_root(2, second.to_str().expect("UTF-8 temporary directory").to_owned());
+    let on_second = |path: &str, disposition| DeviceCreateRequest {
+        device_io_request: DeviceIoRequest {
+            device_id: 2,
+            ..request_header(0, MajorFunction::Create)
+        },
+        ..create_request(path, disposition)
+    };
+
+    // The first drive doesn't see the second's file, and a file made on the second lands in its folder.
+    let missing = create_with(&mut backend, create_request(r"\doc.txt", CreateDisposition::FILE_OPEN));
+    assert_eq!(response_status(&missing), NtStatus::NO_SUCH_FILE);
+    let made = create_with(&mut backend, on_second(r"\new.txt", CreateDisposition::FILE_CREATE));
+    assert_eq!(response_status(&made), NtStatus::SUCCESS);
+    assert!(second.join("new.txt").exists());
+    assert!(!fixture.share.join("new.txt").exists());
+
+    // A rename and a delete act in the folder the file was opened in, whichever drive the request names.
+    let opened = create_with(&mut backend, on_second(r"\doc.txt", CreateDisposition::FILE_OPEN));
+    assert_eq!(response_status(&opened), NtStatus::SUCCESS);
+    let doc = response_file_id(&opened);
+    let response = set_information(&mut backend, doc, rename_to(r"\renamed.txt", false));
+    assert_eq!(response_status(&response), NtStatus::SUCCESS);
+    assert_eq!(
+        std::fs::read(second.join("renamed.txt")).expect("read renamed"),
+        b"second"
+    );
+    let response = set_information(&mut backend, doc, delete_pending(true));
+    assert_eq!(response_status(&response), NtStatus::SUCCESS);
+    close(&mut backend, doc);
+    assert!(!second.join("renamed.txt").exists());
+    close(&mut backend, response_file_id(&made));
+    assert!(second.join("new.txt").exists());
+}
+
 fn create_with(backend: &mut NixRdpdrBackend, request: DeviceCreateRequest) -> Vec<SvcMessage> {
     backend
         .handle_drive_io_request(ServerDriveIoRequest::ServerCreateDriveRequest(request))
