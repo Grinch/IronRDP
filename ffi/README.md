@@ -26,6 +26,17 @@ Read `ActiveStage.DisplayControlState` after each `Process` call: it moves from 
 `Unavailable` means the channel was not requested.
 `ActiveStage.DisplayControlCapabilities` exposes the server's monitor count and area limits once `Ready`.
 
+## Console session and Connection Broker redirection
+
+- `connector.WithAdminSession()` asks for the console session, as `mstsc /admin` does: Client Cluster Data ([MS-RDPBCGR] 2.2.1.3.5) names session 0 with `REDIRECTED_SESSIONID_FIELD_VALID`.
+- `connector.WithRedirectionSupport()` tells the server the client follows Server Redirection PDUs; a Connection Broker redirects only such clients.
+  The other two cluster methods advertise it as well.
+- A redirected connection ends in the `Redirected` state with a `ServerRedirection`.
+  Connect again to its target with `WithLoadBalanceInfo` given the bytes of `redirection.LoadBalanceInfo`, `WithRedirectedSessionId(redirection.SessionId)` and, when `Password` is not empty, `WithRedirectionPasswordCookie` given its bytes.
+  Both properties are `VecU8`s, which `Utils.VecU8ToByte` copies into a `byte[]`; dispose them afterwards.
+- `WithLoadBalanceInfo` drops one trailing CR LF and throws unless the rest is 1 to 238 bytes of printable ASCII, the only routing token the connector can send.
+- The cluster methods compose: a redirected session ID takes precedence over the session 0 of `WithAdminSession`.
+
 ## Touch and pen input (MS-RDPEI)
 
 - Attach the channel before connecting: `connector.WithDynamicChannelRdpei(maxTouchContacts, showTouchVisuals)`.
@@ -56,3 +67,4 @@ Read `ActiveStage.DisplayControlState` after each `Process` call: it moves from 
 
 [Diplomat]: https://github.com/rust-diplomat/diplomat
 [MS-RDPEDISP]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpedisp
+[MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr

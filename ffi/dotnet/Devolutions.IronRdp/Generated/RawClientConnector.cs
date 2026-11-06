@@ -12,6 +12,21 @@ internal partial struct ClientConnector
     [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClientConnector_new", CallingConvention = CallingConvention.Cdecl)]
     internal static unsafe extern DiplomatResultClientConnectorIronRdpError New(Config* config, DiplomatSliceU8 clientAddr);
 
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClientConnector_with_redirection_support", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern DiplomatResultVoidIronRdpError WithRedirectionSupport(ClientConnector* handle);
+
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClientConnector_with_admin_session", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern DiplomatResultVoidIronRdpError WithAdminSession(ClientConnector* handle);
+
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClientConnector_with_redirected_session_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern DiplomatResultVoidIronRdpError WithRedirectedSessionId(ClientConnector* handle, uint sessionId);
+
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClientConnector_with_load_balance_info", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern DiplomatResultVoidIronRdpError WithLoadBalanceInfo(ClientConnector* handle, DiplomatSliceU8 loadBalanceInfo);
+
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClientConnector_with_redirection_password_cookie", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern DiplomatResultVoidIronRdpError WithRedirectionPasswordCookie(ClientConnector* handle, DiplomatSliceU8 cookie);
+
     [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClientConnector_with_static_channel_rdp_snd", CallingConvention = CallingConvention.Cdecl)]
     internal static unsafe extern DiplomatResultVoidIronRdpError WithStaticChannelRdpSnd(ClientConnector* handle);
 

@@ -420,6 +420,38 @@ internal static class SmokeTests
             True(error.Message.Contains("credentials not set"), $"error message: {error.Message}");
         });
 
+        // oracle: spec MS-RDPBCGR 2.2.1.1 (routingToken replaces the cookie and ends with CR LF)
+        yield return ("load balance info becomes the X.224 routing token", () =>
+        {
+            var connector = ClientConnector.New(TlsConfig(), "127.0.0.1:33890");
+            Throws<IronRdpException>(() => connector.WithLoadBalanceInfo(new byte[] { 0x01, 0x02 }));
+            Throws<IronRdpException>(() => connector.WithLoadBalanceInfo(Array.Empty<byte>()));
+            connector.WithLoadBalanceInfo(System.Text.Encoding.ASCII.GetBytes("Cookie: msts=3640655040.15629.0000\r\n"));
+
+            var buf = WriteBuf.New();
+            connector.StepNoInput(buf);
+            var filled = buf.Filled;
+            var request = new byte[(int)filled.Size];
+            filled.Fill(request);
+            var text = System.Text.Encoding.ASCII.GetString(request);
+            True(text.Contains("Cookie: msts=3640655040.15629.0000\r\n"), $"request: {Convert.ToHexString(request)}");
+            True(!text.Contains("mstshash"), "the routing token replaces the user name cookie");
+        });
+
+        // oracle: ffi/README.md "Console session and Connection Broker redirection"
+        yield return ("connector attaches the redirection settings before connecting", () =>
+        {
+            var connector = ClientConnector.New(TlsConfig(), "127.0.0.1:33890");
+            connector.WithRedirectionSupport();
+            connector.WithAdminSession();
+            connector.WithRedirectedSessionId(5);
+            connector.WithRedirectionPasswordCookie(new byte[] { 1, 2, 3 });
+            Throws<IronRdpException>(() => connector.WithRedirectionPasswordCookie(Array.Empty<byte>()));
+
+            var buf = WriteBuf.New();
+            True(connector.StepNoInput(buf).Size.IsSome(), "the connector still starts the connection");
+        });
+
         yield return ("connector sends an X.224 request and accepts the confirm", () =>
         {
             var config = TlsConfig();

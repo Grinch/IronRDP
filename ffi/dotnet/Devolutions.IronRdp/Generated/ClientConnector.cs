@@ -123,6 +123,129 @@ public partial class ClientConnector
     }
 
     /// <exception cref="IronRdpException"></exception>
+    public void WithRedirectionSupport()
+    {
+        unsafe
+        {
+            BorrowLease<Raw.ClientConnector>? selfLease = null;
+            try
+            {
+                selfLease = _diplomatHandle.Lease(BorrowKind.Exclusive);
+                var result = Raw.ClientConnector.WithRedirectionSupport(selfLease!.Ptr);
+                if (!result.IsOk)
+                {
+                    throw new IronRdpException(new IronRdpError(result.Err));
+                }
+                return;
+            }
+            finally
+            {
+                selfLease?.Release();
+            }
+        }
+    }
+
+    /// <exception cref="IronRdpException"></exception>
+    public void WithAdminSession()
+    {
+        unsafe
+        {
+            BorrowLease<Raw.ClientConnector>? selfLease = null;
+            try
+            {
+                selfLease = _diplomatHandle.Lease(BorrowKind.Exclusive);
+                var result = Raw.ClientConnector.WithAdminSession(selfLease!.Ptr);
+                if (!result.IsOk)
+                {
+                    throw new IronRdpException(new IronRdpError(result.Err));
+                }
+                return;
+            }
+            finally
+            {
+                selfLease?.Release();
+            }
+        }
+    }
+
+    /// <exception cref="IronRdpException"></exception>
+    public void WithRedirectedSessionId(uint sessionId)
+    {
+        unsafe
+        {
+            BorrowLease<Raw.ClientConnector>? selfLease = null;
+            try
+            {
+                selfLease = _diplomatHandle.Lease(BorrowKind.Exclusive);
+                var result = Raw.ClientConnector.WithRedirectedSessionId(selfLease!.Ptr, sessionId);
+                if (!result.IsOk)
+                {
+                    throw new IronRdpException(new IronRdpError(result.Err));
+                }
+                return;
+            }
+            finally
+            {
+                selfLease?.Release();
+            }
+        }
+    }
+
+    /// <exception cref="IronRdpException"></exception>
+    public void WithLoadBalanceInfo(byte[] loadBalanceInfo)
+    {
+        unsafe
+        {
+            if (loadBalanceInfo == null) throw new ArgumentNullException(nameof(loadBalanceInfo));
+            BorrowLease<Raw.ClientConnector>? selfLease = null;
+            try
+            {
+                selfLease = _diplomatHandle.Lease(BorrowKind.Exclusive);
+                fixed (byte* loadBalanceInfoPtr = loadBalanceInfo)
+                {
+                    var result = Raw.ClientConnector.WithLoadBalanceInfo(selfLease!.Ptr, new DiplomatSliceU8 { Ptr = loadBalanceInfoPtr, Len = (nuint)loadBalanceInfo.Length });
+                    if (!result.IsOk)
+                    {
+                        throw new IronRdpException(new IronRdpError(result.Err));
+                    }
+                    return;
+                }
+            }
+            finally
+            {
+                selfLease?.Release();
+            }
+        }
+    }
+
+    /// <exception cref="IronRdpException"></exception>
+    public void WithRedirectionPasswordCookie(byte[] cookie)
+    {
+        unsafe
+        {
+            if (cookie == null) throw new ArgumentNullException(nameof(cookie));
+            BorrowLease<Raw.ClientConnector>? selfLease = null;
+            try
+            {
+                selfLease = _diplomatHandle.Lease(BorrowKind.Exclusive);
+                fixed (byte* cookiePtr = cookie)
+                {
+                    var result = Raw.ClientConnector.WithRedirectionPasswordCookie(selfLease!.Ptr, new DiplomatSliceU8 { Ptr = cookiePtr, Len = (nuint)cookie.Length });
+                    if (!result.IsOk)
+                    {
+                        throw new IronRdpException(new IronRdpError(result.Err));
+                    }
+                    return;
+                }
+            }
+            finally
+            {
+                selfLease?.Release();
+            }
+        }
+    }
+
+    /// <exception cref="IronRdpException"></exception>
     public void WithStaticChannelRdpSnd()
     {
         unsafe
