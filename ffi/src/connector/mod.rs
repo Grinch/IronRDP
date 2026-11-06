@@ -1,5 +1,6 @@
 pub mod activation;
 pub mod config;
+pub mod drives;
 pub mod result;
 pub mod state;
 
@@ -17,6 +18,7 @@ pub mod ffi {
     use tracing::info;
 
     use super::config::ffi::Config;
+    use super::drives::ffi::DriveRedirection;
     use super::result::ffi::Written;
     use super::state::ffi::ClientConnectorState;
     use crate::clipboard::ffi::Cliprdr;
@@ -63,11 +65,15 @@ pub mod ffi {
         ///
         /// Some WinSCard calls complete asynchronously: call `ActiveStage::poll_rdpdr_deferred`
         /// periodically to send their results to the server.
+        ///
+        /// A connection has one RDPDR channel, so this and `with_static_channel_rdpdr_drives` are
+        /// alternatives: the second one called fails.
         pub fn with_static_channel_rdpdr(
             &mut self,
             computer_name: &str,
             smart_card_device_id: u32,
         ) -> Result<(), Box<IronRdpError>> {
+            self.ensure_no_rdpdr()?;
             let Some(connector) = self.0.take() else {
                 return Err(ValueConsumedError::for_item("connector").into());
             };
@@ -90,6 +96,111 @@ pub mod ffi {
                 ironrdp::rdpdr::Rdpdr::new(backend, computer_name.to_owned()).with_smartcard(smart_card_device_id),
             ));
 
+            Ok(())
+        }
+
+        /// Attaches the RDPDR channel ([MS-RDPEFS]) sharing the folders of `drives`, which the session shows as
+        /// `\\tsclient\<name>`. No smart card is announced.
+        ///
+        /// A connection has one RDPDR channel, so this and `with_static_channel_rdpdr` are alternatives: the
+        /// second one called fails.
+        /// With `drives` empty the channel is attached with no device: Windows servers start audio playback
+        /// (RDPSND) only once a client has the RDPDR channel, so a client playing audio without sharing folders
+        /// calls this with an empty `DriveRedirection`.
+        /// Fails as well when a folder can no longer be opened, and on platforms other than Windows, Linux and
+        /// macOS (`WrongOS`).
+        ///
+        /// Windows shares every drive, with the access of the user running the client.
+        /// Linux and macOS share every drive too, each from its own folder; server paths never leave a drive's
+        /// folder, as symbolic links are not followed.
+        /// Some file operations complete later: call `ActiveStage::poll_rdpdr_deferred` periodically to send their
+        /// results to the server.
+        ///
+        /// [MS-RDPEFS]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpefs/
+        pub fn with_static_channel_rdpdr_drives(
+            &mut self,
+            computer_name: &str,
+            drives: &DriveRedirection,
+        ) -> Result<(), Box<IronRdpError>> {
+            self.ensure_no_rdpdr()?;
+            if drives.0.is_empty() {
+                let Some(connector) = self.0.take() else {
+                    return Err(ValueConsumedError::for_item("connector").into());
+                };
+                self.0 = Some(connector.with_static_channel(ironrdp::rdpdr::Rdpdr::new(
+                    Box::new(ironrdp::rdpdr::NoopRdpdrBackend),
+                    computer_name.to_owned(),
+                )));
+                return Ok(());
+            }
+
+            #[cfg(windows)]
+            let rdpdr = {
+                let redirected = (1u32..)
+                    .zip(&drives.0)
+                    .map(|(device_id, folder)| {
+                        ironrdp_rdpdr_native::RedirectedDrive::new(
+                            device_id,
+                            folder.name.as_str(),
+                            folder.path.as_str(),
+                            false,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| {
+                        crate::error::GenericError(anyhow::Error::new(error).context("invalid redirected drive"))
+                    })?;
+                let factory =
+                    ironrdp_rdpdr_native::WindowsRdpdrBackendFactory::from_drives(redirected).map_err(|error| {
+                        crate::error::GenericError(
+                            anyhow::Error::new(error).context("invalid RDPDR backend configuration"),
+                        )
+                    })?;
+                ironrdp::rdpdr::Rdpdr::new(Box::new(factory.build()), computer_name.to_owned())
+                    .with_drives(Some(factory.initial_drives()))
+            };
+
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            let rdpdr = {
+                // Each drive is served from its own folder, numbered from 1 as on Windows.
+                let Some(first) = drives.0.first() else {
+                    return Err("no drive to redirect".into());
+                };
+                let mut backend = ironrdp_rdpdr_native::backend::NixRdpdrBackend::new(first.path.clone());
+                let mut announced = Vec::with_capacity(drives.0.len());
+                for (device_id, folder) in (1u32..).zip(&drives.0) {
+                    backend = backend.with_drive_root(device_id, folder.path.clone());
+                    announced.push((device_id, folder.name.clone()));
+                }
+                ironrdp::rdpdr::Rdpdr::new(Box::new(backend), computer_name.to_owned()).with_drives(Some(announced))
+            };
+
+            #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+            let rdpdr: ironrdp::rdpdr::Rdpdr = {
+                let _ = computer_name;
+                return Err(crate::error::WrongOSError::expected_platform("windows, linux or macos")
+                    .with_custom_message("drive redirection is not available on this platform: ")
+                    .into());
+            };
+
+            let Some(connector) = self.0.take() else {
+                return Err(ValueConsumedError::for_item("connector").into());
+            };
+            self.0 = Some(connector.with_static_channel(rdpdr));
+            Ok(())
+        }
+
+        /// Fails when an RDPDR channel is already attached, since a connection has only one.
+        fn ensure_no_rdpdr(&mut self) -> Result<(), Box<IronRdpError>> {
+            let Some(connector) = self.0.as_mut() else {
+                return Err(ValueConsumedError::for_item("connector").into());
+            };
+            if connector
+                .get_static_channel_processor::<ironrdp::rdpdr::Rdpdr>()
+                .is_some()
+            {
+                return Err("an RDPDR channel is already attached".into());
+            }
             Ok(())
         }
 

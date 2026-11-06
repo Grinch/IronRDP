@@ -174,6 +174,38 @@ public partial class ClientConnector
     }
 
     /// <exception cref="IronRdpException"></exception>
+    public void WithStaticChannelRdpdrDrives(string computerName, DriveRedirection drives)
+    {
+        unsafe
+        {
+            if (computerName == null) throw new ArgumentNullException(nameof(computerName));
+            if (drives == null) throw new ArgumentNullException(nameof(drives));
+            byte[] computerNameBytes = Diplomat.Utf8.Clone(computerName);
+            BorrowLease<Raw.ClientConnector>? selfLease = null;
+            BorrowLease<Raw.DriveRedirection>? drivesLease = null;
+            try
+            {
+                selfLease = _diplomatHandle.Lease(BorrowKind.Exclusive);
+                drivesLease = drives._diplomatHandle.Lease(BorrowKind.Shared);
+                fixed (byte* computerNamePtr = computerNameBytes)
+                {
+                    var result = Raw.ClientConnector.WithStaticChannelRdpdrDrives(selfLease!.Ptr, new DiplomatSliceU8 { Ptr = computerNamePtr, Len = (nuint)computerNameBytes.Length }, drivesLease!.Ptr);
+                    if (!result.IsOk)
+                    {
+                        throw new IronRdpException(new IronRdpError(result.Err));
+                    }
+                    return;
+                }
+            }
+            finally
+            {
+                selfLease?.Release();
+                drivesLease?.Release();
+            }
+        }
+    }
+
+    /// <exception cref="IronRdpException"></exception>
     public void WithDynamicChannelDisplayControl()
     {
         unsafe

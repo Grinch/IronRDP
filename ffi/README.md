@@ -26,6 +26,14 @@ Read `ActiveStage.DisplayControlState` after each `Process` call: it moves from 
 `Unavailable` means the channel was not requested.
 `ActiveStage.DisplayControlCapabilities` exposes the server's monitor count and area limits once `Ready`.
 
+## Drive redirection
+
+Fill a `DriveRedirection` with `AddDrive(name, path)` and attach it with `connector.WithStaticChannelRdpdrDrives(computerName, drives)`; the session shows each folder as `\\tsclient\<name>`.
+A connection has one RDPDR channel, so `WithStaticChannelRdpdrDrives` and `WithStaticChannelRdpdr` (smart card) are alternatives, and the second one called throws.
+Windows, Linux and macOS share every drive added, each from its own folder (`DriveRedirection.SupportsMultipleDrives()`).
+With an empty `DriveRedirection`, the channel is attached with no device: Windows servers start audio playback only once the client has the RDPDR channel, so a client playing audio without sharing folders attaches it that way.
+Call `ActiveStage.PollRdpdrDeferred()` on a timer, as for smart cards, since some file operations complete later.
+
 ## Touch and pen input (MS-RDPEI)
 
 - Attach the channel before connecting: `connector.WithDynamicChannelRdpei(maxTouchContacts, showTouchVisuals)`.

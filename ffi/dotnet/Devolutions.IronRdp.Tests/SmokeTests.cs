@@ -420,6 +420,44 @@ internal static class SmokeTests
             True(error.Message.Contains("credentials not set"), $"error message: {error.Message}");
         });
 
+        // oracle: ffi/README.md "Drive redirection"
+        yield return ("drive redirection checks its folders and takes the one RDPDR channel", () =>
+        {
+            var connector = ClientConnector.New(TlsConfig(), "127.0.0.1:33890");
+
+            var drives = DriveRedirection.New();
+            Throws<IronRdpException>(() => drives.AddDrive("Relative", "relative\\folder"));
+            Throws<IronRdpException>(() => drives.AddDrive("", Path.GetTempPath()));
+            drives.AddDrive("Temp", Path.GetTempPath());
+            Equal(1, (int)drives.Count, "drive count");
+            Throws<IronRdpException>(() => drives.AddDrive("TEMP", Path.GetTempPath()));
+            if (DriveRedirection.SupportsMultipleDrives())
+            {
+                drives.AddDrive("Other", Path.GetTempPath());
+                Equal(2, (int)drives.Count, "drive count");
+            }
+            else
+            {
+                Throws<IronRdpException>(() => drives.AddDrive("Other", Path.GetTempPath()));
+            }
+
+            connector.WithStaticChannelRdpdrDrives("smoke-tests", drives);
+            var error = Throws<IronRdpException>(() => connector.WithStaticChannelRdpdr("smoke-tests", 0));
+            True(error.Message.Contains("already attached"), $"error message: {error.Message}");
+
+            var buf = WriteBuf.New();
+            True(connector.StepNoInput(buf).Size.IsSome(), "the connector still starts the connection");
+        });
+
+        // oracle: ffi/README.md "Drive redirection"
+        yield return ("an empty drive list attaches the RDPDR channel with no device", () =>
+        {
+            var connector = ClientConnector.New(TlsConfig(), "127.0.0.1:33890");
+            connector.WithStaticChannelRdpdrDrives("smoke-tests", DriveRedirection.New());
+            var error = Throws<IronRdpException>(() => connector.WithStaticChannelRdpdrDrives("smoke-tests", DriveRedirection.New()));
+            True(error.Message.Contains("already attached"), $"error message: {error.Message}");
+        });
+
         yield return ("connector sends an X.224 request and accepts the confirm", () =>
         {
             var config = TlsConfig();

@@ -26,7 +26,7 @@ tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1.0"
 
-[target.'cfg(windows)'.dependencies]
+[target.'cfg(any(windows, target_os = "linux", target_os = "macos"))'.dependencies]
 ironrdp-rdpdr-native.path = "../crates/ironrdp-rdpdr-native"
 
 [target.'cfg(windows)'.build-dependencies]
