@@ -15,6 +15,8 @@
 //! returns a fixed picture, so the AVC rows measure only the work IronRDP does around a decoder:
 //! color conversion and copies. `avc/picture-clone` is the stand-in's own cost, to subtract.
 //!
+//! `avc/*` and `planar/*` time stages of the rows above on their own.
+//!
 //! Throughput is reported in painted pixels for frames and in decompressed bytes for ZGFX.
 
 #![expect(unused_crate_dependencies, reason = "not all bench targets use all dependencies")]
@@ -25,7 +27,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use ironrdp::core::encode_vec;
 use ironrdp::graphics::clearcodec::ClearCodecEncoder;
 use ironrdp::graphics::image_processing::PixelFormat as ImageFormat;
-use ironrdp::graphics::rdp6::{BitmapStreamEncoder, RgbAChannels};
+use ironrdp::graphics::rdp6::{BitmapStreamDecoder, BitmapStreamEncoder, RgbAChannels};
 use ironrdp::graphics::zgfx::{CompressionMode, Compressor, Decompressor, compress_and_wrap_egfx};
 use ironrdp::pdu::codecs::rfx::EntropyAlgorithm;
 use ironrdp::pdu::geometry::ExclusiveRectangle;
@@ -180,6 +182,17 @@ fn tiles(image: &[u8]) -> impl Iterator<Item = (ExclusiveRectangle, Vec<u8>)> + 
     })
 }
 
+/// The `rect` tile `rgba` as an RDP 6.0 bitmap stream, its planes RLE-compressed if `rle` is set.
+fn planar_tile(rect: &ExclusiveRectangle, rgba: &[u8], rle: bool) -> Vec<u8> {
+    let (w, h) = (usize::from(rect.right - rect.left), usize::from(rect.bottom - rect.top));
+    let mut data = vec![0; w * h * BPP + 1024];
+    let len = BitmapStreamEncoder::new(w, h)
+        .encode_bitmap::<RgbAChannels>(rgba, &mut data, rle)
+        .expect("planar encode");
+    data.truncate(len);
+    data
+}
+
 /// Deterministic incompressible bytes standing in for an H.264 bitstream.
 fn noise(len: usize, seed: u32) -> Vec<u8> {
     let mut x = seed;
@@ -284,12 +297,7 @@ fn scenario(codec: Command, pattern: Pattern) -> Scenario {
         }
         Command::Planar => tiles(&image)
             .map(|(rect, rgba)| {
-                let (w, h) = (usize::from(rect.right - rect.left), usize::from(rect.bottom - rect.top));
-                let mut data = vec![0; w * h * BPP + 1024];
-                let len = BitmapStreamEncoder::new(w, h)
-                    .encode_bitmap::<RgbAChannels>(&rgba, &mut data, true)
-                    .expect("planar encode");
-                data.truncate(len);
+                let data = planar_tile(&rect, &rgba, true);
                 wts1(Codec1Type::Planar, rect, data)
             })
             .collect(),
@@ -530,6 +538,35 @@ fn pipeline(c: &mut Criterion, scenarios: &[Scenario]) {
     group.finish();
 }
 
+/// The Planar decoder on its own, over every tile of the text frame, with raw and RLE planes.
+fn planar(c: &mut Criterion) {
+    let image = render(Pattern::Text, usize::from(WIDTH), usize::from(HEIGHT));
+    let mut group = c.benchmark_group("planar");
+    group.throughput(Throughput::Elements(u64::from(WIDTH) * u64::from(HEIGHT)));
+    for (name, rle) in [("decode-raw", false), ("decode-rle", true)] {
+        let streams: Vec<(usize, usize, Vec<u8>)> = tiles(&image)
+            .map(|(rect, rgba)| {
+                let (w, h) = (usize::from(rect.right - rect.left), usize::from(rect.bottom - rect.top));
+                (w, h, planar_tile(&rect, &rgba, rle))
+            })
+            .collect();
+        let mut decoder = BitmapStreamDecoder::default();
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                for (w, h, data) in &streams {
+                    // A new buffer per tile, as the graphics pipeline client does.
+                    let mut rgb24 = Vec::new();
+                    decoder
+                        .decode_bitmap_stream_to_rgb24(black_box(data), &mut rgb24, *w, *h)
+                        .expect("planar decode");
+                    black_box(rgb24);
+                }
+            })
+        });
+    }
+    group.finish();
+}
+
 #[expect(
     clippy::print_stderr,
     reason = "the wire sizes describe the fixtures the timings are for"
@@ -549,6 +586,7 @@ fn benches(c: &mut Criterion) {
     }
     zgfx(c, &scenarios);
     pipeline(c, &scenarios);
+    planar(c);
 }
 
 criterion_group!(egfx, benches);
