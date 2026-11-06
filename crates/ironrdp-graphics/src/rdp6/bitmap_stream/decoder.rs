@@ -205,10 +205,11 @@ impl<'a> BitmapStreamDecoderImpl<'a> {
         let g_plane = &planes[g_offset..g_offset + self.full_plane_size];
         let b_plane = &planes[b_offset..b_offset + self.full_plane_size];
 
-        for i in 0..self.full_plane_size {
-            let (r, g, b) = (r_plane[i], g_plane[i], b_plane[i]);
-
-            dst.extend_from_slice(&[r, g, b]);
+        let start = dst.len();
+        dst.resize(start + self.full_plane_size * 3, 0);
+        let pixels = r_plane.iter().zip(g_plane).zip(b_plane);
+        for (out, ((&r, &g), &b)) in dst[start..].chunks_exact_mut(3).zip(pixels) {
+            out.copy_from_slice(&[r, g, b]);
         }
     }
 
