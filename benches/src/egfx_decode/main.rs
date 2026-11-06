@@ -15,7 +15,7 @@
 //! returns a fixed picture, so the AVC rows measure only the work IronRDP does around a decoder:
 //! color conversion and copies. `avc/picture-clone` is the stand-in's own cost, to subtract.
 //!
-//! Throughput is reported in pixels for whole frames and in decompressed bytes for ZGFX.
+//! Throughput is reported in painted pixels for frames and in decompressed bytes for ZGFX.
 
 #![expect(unused_crate_dependencies, reason = "not all bench targets use all dependencies")]
 
@@ -66,6 +66,8 @@ enum Command {
     ClearCodec,
     Planar,
     Avc420,
+    /// AVC420 whose regions cover a window and the taskbar, about 15% of the screen.
+    Avc420Partial,
     Avc444,
 }
 
@@ -76,12 +78,13 @@ impl Command {
             Self::ClearCodec => "clearcodec",
             Self::Planar => "planar",
             Self::Avc420 => "avc420",
+            Self::Avc420Partial => "avc420-partial",
             Self::Avc444 => "avc444",
         }
     }
 }
 
-const SCENARIOS: [(Command, Pattern); 8] = [
+const SCENARIOS: [(Command, Pattern); 9] = [
     (Command::RemoteFx, Pattern::Desktop),
     (Command::RemoteFx, Pattern::Text),
     (Command::RemoteFx, Pattern::Photo),
@@ -89,6 +92,7 @@ const SCENARIOS: [(Command, Pattern); 8] = [
     (Command::ClearCodec, Pattern::Text),
     (Command::Planar, Pattern::Text),
     (Command::Avc420, Pattern::Photo),
+    (Command::Avc420Partial, Pattern::Photo),
     (Command::Avc444, Pattern::Photo),
 ];
 
@@ -102,6 +106,8 @@ struct Scenario {
     message: Vec<u8>,
     /// Size of `message` once decompressed.
     decompressed_len: usize,
+    /// Pixels the frame paints.
+    painted: u64,
     /// A YUV picture for the stand-in H.264 decoder.
     picture: Option<Yuv420Frame>,
 }
@@ -218,16 +224,38 @@ fn yuv420(image: &[u8]) -> Yuv420Frame {
     .expect("valid planes")
 }
 
-fn avc420_stream(data: &[u8]) -> Avc420BitmapStream<'_> {
-    Avc420BitmapStream {
-        rectangles: vec![full_screen()],
-        quant_qual_vals: vec![QuantQuality {
+fn avc420_stream(data: &[u8], rectangles: Vec<ExclusiveRectangle>) -> Avc420BitmapStream<'_> {
+    let quant_qual_vals = rectangles
+        .iter()
+        .map(|_| QuantQuality {
             quantization_parameter: 22,
             progressive: false,
             quality: 100,
-        }],
+        })
+        .collect();
+    Avc420BitmapStream {
+        rectangles,
+        quant_qual_vals,
         data,
     }
+}
+
+/// The regions of [`Command::Avc420Partial`]: a 640x360 window and the taskbar.
+fn partial_regions() -> Vec<ExclusiveRectangle> {
+    vec![
+        ExclusiveRectangle {
+            left: 101,
+            top: 100,
+            right: 741,
+            bottom: 460,
+        },
+        ExclusiveRectangle {
+            left: 0,
+            top: HEIGHT - 40,
+            right: WIDTH,
+            bottom: HEIGHT,
+        },
+    ]
 }
 
 fn scenario(codec: Command, pattern: Pattern) -> Scenario {
@@ -268,7 +296,13 @@ fn scenario(codec: Command, pattern: Pattern) -> Scenario {
         Command::Avc420 => {
             picture = Some(yuv420(&image));
             let h264 = noise(H264_BYTES, 0x0BAD_5EED);
-            let data = encode_vec(&avc420_stream(&h264)).expect("encode AVC420 stream");
+            let data = encode_vec(&avc420_stream(&h264, vec![full_screen()])).expect("encode AVC420 stream");
+            vec![wts1(Codec1Type::Avc420, full_screen(), data)]
+        }
+        Command::Avc420Partial => {
+            picture = Some(yuv420(&image));
+            let h264 = noise(H264_BYTES, 0x0BAD_5EED);
+            let data = encode_vec(&avc420_stream(&h264, partial_regions())).expect("encode AVC420 stream");
             vec![wts1(Codec1Type::Avc420, full_screen(), data)]
         }
         Command::Avc444 => {
@@ -277,14 +311,22 @@ fn scenario(codec: Command, pattern: Pattern) -> Scenario {
             let chroma = noise(H264_BYTES, 0x5EED_0BAD);
             let stream = Avc444BitmapStream {
                 encoding: Encoding::LUMA_AND_CHROMA,
-                stream1: avc420_stream(&luma),
-                stream2: Some(avc420_stream(&chroma)),
+                stream1: avc420_stream(&luma, vec![full_screen()]),
+                stream2: Some(avc420_stream(&chroma, vec![full_screen()])),
             };
             let data = encode_vec(&stream).expect("encode AVC444 stream");
             vec![wts1(Codec1Type::Avc444, full_screen(), data)]
         }
     };
 
+    let painted = if codec == Command::Avc420Partial {
+        partial_regions()
+            .iter()
+            .map(|r| u64::from(r.right - r.left) * u64::from(r.bottom - r.top))
+            .sum()
+    } else {
+        u64::from(WIDTH) * u64::from(HEIGHT)
+    };
     let (message, decompressed_len) = frame_message(commands);
     Scenario {
         id: format!("{}/{}", codec.name(), pattern.name()),
@@ -292,6 +334,7 @@ fn scenario(codec: Command, pattern: Pattern) -> Scenario {
         prime,
         message,
         decompressed_len,
+        painted,
         picture,
     }
 }
@@ -362,13 +405,13 @@ fn client(scenario: &Scenario) -> GraphicsPipelineClient {
     let _ = client.take_output_reset();
     let _ = client.drain_output();
 
-    // The frame must paint the whole output, or the measurement is of a decode that bailed out.
+    // The frame must paint what it covers, or the measurement is of a decode that bailed out.
     client.process(0, &scenario.message).expect("frame");
     let painted: usize = client.drain_output().iter().map(|update| update.data.len()).sum();
     assert_eq!(
-        painted,
-        usize::from(WIDTH) * usize::from(HEIGHT) * BPP,
-        "{} paints the full output",
+        u64::try_from(painted).expect("fits"),
+        scenario.painted * u64::try_from(BPP).expect("fits"),
+        "{} paints what it covers",
         scenario.id
     );
     client
@@ -437,8 +480,8 @@ fn pipeline(c: &mut Criterion, scenarios: &[Scenario]) {
     let pixels = u64::from(WIDTH) * u64::from(HEIGHT);
 
     let mut group = c.benchmark_group("pipeline");
-    group.throughput(Throughput::Elements(pixels));
     for scenario in scenarios {
+        group.throughput(Throughput::Elements(scenario.painted));
         let mut client = client(scenario);
         group.bench_function(&scenario.id, |b| {
             b.iter(|| {
@@ -450,8 +493,8 @@ fn pipeline(c: &mut Criterion, scenarios: &[Scenario]) {
     group.finish();
 
     let mut group = c.benchmark_group("session");
-    group.throughput(Throughput::Elements(pixels));
     for scenario in scenarios {
+        group.throughput(Throughput::Elements(scenario.painted));
         let mut client = client(scenario);
         let mut image = DecodedImage::new(ImageFormat::RgbA32, WIDTH, HEIGHT);
         group.bench_function(&scenario.id, |b| {
