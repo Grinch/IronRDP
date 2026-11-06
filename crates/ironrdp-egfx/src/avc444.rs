@@ -196,23 +196,44 @@ impl Yuv444Frame {
         if !(left < right && top < bottom) {
             return Vec::new();
         }
-        let mut rgba = Vec::with_capacity((right - left) * (bottom - top) * 4);
-        for row in top..bottom {
+        let row_bytes = (right - left) * 4;
+        let mut rgba = vec![0; row_bytes * (bottom - top)];
+        // The chroma of an even row, with the reverse filter applied.
+        let (mut filtered_u, mut filtered_v) = (vec![0; right - left], vec![0; right - left]);
+        for (row, out) in (top..bottom).zip(rgba.chunks_exact_mut(row_bytes)) {
             let line = row * self.stride;
-            for col in left..right {
-                let at = line + col;
-                let (mut u, mut v) = (self.u[at], self.v[at]);
-                if row % 2 == 0 && col % 2 == 0 {
-                    // The block's other three samples are inside the padded planes: `stride` and
-                    // `rows` are even, and so are `row` and `col`.
-                    let below = at + self.stride;
-                    u = reverse_filter(u, self.u[at + 1], self.u[below], self.u[below + 1]);
-                    v = reverse_filter(v, self.v[at + 1], self.v[below], self.v[below + 1]);
-                }
-                rgba.extend_from_slice(&yuv_to_rgba(self.y[at], u, v));
+            let pixels = line + left..line + right;
+            if row % 2 == 1 {
+                yuv444_row_to_rgba(&self.y[pixels.clone()], &self.u[pixels.clone()], &self.v[pixels], out);
+            } else {
+                self.reverse_filter_row(&self.u, line, left..right, &mut filtered_u);
+                self.reverse_filter_row(&self.v, line, left..right, &mut filtered_v);
+                yuv444_row_to_rgba(&self.y[pixels], &filtered_u, &filtered_v, out);
             }
         }
         rgba
+    }
+
+    /// Copies `columns` of the even row of `plane` that starts at `line` into `out`, undoing with
+    /// the reverse filter the 2x2 block average that each even-column sample holds.
+    fn reverse_filter_row(&self, plane: &[u8], line: usize, columns: core::ops::Range<usize>, out: &mut [u8]) {
+        // The block's other three samples are inside the padded planes: `stride` and `rows` are
+        // even, and so is the row, so the row below exists and each even column has a right
+        // neighbor.
+        let below = line + self.stride;
+        let (samples, samples_below) = (&plane[line..below], &plane[below..below + self.stride]);
+        out.copy_from_slice(&samples[columns.clone()]);
+        let first = columns.start.next_multiple_of(2);
+        if first >= columns.end {
+            return;
+        }
+        let block_columns = first..first + (columns.end - first).next_multiple_of(2);
+        let blocks = samples[block_columns.clone()]
+            .chunks_exact(2)
+            .zip(samples_below[block_columns].chunks_exact(2));
+        for (out, (row, below)) in out[first - columns.start..].chunks_mut(2).zip(blocks) {
+            out[0] = reverse_filter(row[0], row[1], below[0], below[1]);
+        }
     }
 
     /// Splits the picture into its main and auxiliary views.
@@ -433,17 +454,90 @@ fn average(a: u8, b: u8, c: u8, d: u8) -> u8 {
 
 /// Converts a pixel with the reverse transform of [MS-RDPEGFX] 3.3.8.3.1 ("Color Conversion").
 ///
+/// The channels are packed into one word, a form in which the compiler converts several pixels
+/// at once.
+///
 /// [MS-RDPEGFX]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx/da5c75f9-cd99-450c-98c4-014a496942b0
-pub(crate) fn yuv_to_rgba(y: u8, u: u8, v: u8) -> [u8; 4] {
+fn yuv_to_rgba(y: u8, u: u8, v: u8) -> [u8; 4] {
     let luma = 256 * i32::from(y);
     let u = i32::from(u) - 128;
     let v = i32::from(v) - 128;
-    [
-        clamp_channel((luma + 403 * v) >> 8),
-        clamp_channel((luma - 48 * u - 120 * v) >> 8),
-        clamp_channel((luma + 475 * u) >> 8),
-        0xFF,
-    ]
+    let channel = |value: i32| (value >> 8).clamp(0, 255).cast_unsigned();
+    let rgba = channel(luma + 403 * v) | (channel(luma - 48 * u - 120 * v) << 8) | (channel(luma + 475 * u) << 16);
+    (rgba | 0xFF00_0000).to_le_bytes()
+}
+
+/// Converts one row of a 4:4:4 picture into `out`.
+fn yuv444_row_to_rgba(y: &[u8], u: &[u8], v: &[u8], out: &mut [u8]) {
+    // Fixed-size blocks let the compiler convert several pixels at once.
+    const LANES: usize = 16;
+    let mut out_blocks = out.chunks_exact_mut(LANES * 4);
+    let mut y_blocks = y.chunks_exact(LANES);
+    let mut u_blocks = u.chunks_exact(LANES);
+    let mut v_blocks = v.chunks_exact(LANES);
+    let blocks = (&mut y_blocks).zip(&mut u_blocks).zip(&mut v_blocks);
+    for (out, ((y, u), v)) in (&mut out_blocks).zip(blocks) {
+        for (out, ((&y, &u), &v)) in out.chunks_exact_mut(4).zip(y.iter().zip(u).zip(v)) {
+            out.copy_from_slice(&yuv_to_rgba(y, u, v));
+        }
+    }
+    let samples = y_blocks
+        .remainder()
+        .iter()
+        .zip(u_blocks.remainder())
+        .zip(v_blocks.remainder());
+    for (out, ((&y, &u), &v)) in out_blocks.into_remainder().chunks_exact_mut(4).zip(samples) {
+        out.copy_from_slice(&yuv_to_rgba(y, u, v));
+    }
+}
+
+/// Converts one row of a 4:2:0 picture, in which each chroma sample covers two pixels, into `out`.
+pub(crate) fn yuv420_row_to_rgba(y: &[u8], u: &[u8], v: &[u8], out: &mut [u8]) {
+    let mut out_pairs = out.chunks_exact_mut(8);
+    let mut y_pairs = y.chunks_exact(2);
+    let mut chroma = u.iter().zip(v).map(|(&u, &v)| Chroma::new(u, v));
+    for ((out, y), chroma) in (&mut out_pairs).zip(&mut y_pairs).zip(&mut chroma) {
+        out[..4].copy_from_slice(&chroma.rgba(y[0]));
+        out[4..].copy_from_slice(&chroma.rgba(y[1]));
+    }
+    // An odd width leaves one pixel with a chroma sample of its own.
+    if let (Some(out), Some(&y), Some(chroma)) = (
+        out_pairs.into_remainder().get_mut(..4),
+        y_pairs.remainder().first(),
+        chroma.next(),
+    ) {
+        out.copy_from_slice(&chroma.rgba(y));
+    }
+}
+
+/// The chroma terms of [`yuv_to_rgba`], computed once for every pixel that shares them.
+#[derive(Clone, Copy)]
+pub(crate) struct Chroma {
+    red: i32,
+    green: i32,
+    blue: i32,
+}
+
+impl Chroma {
+    pub(crate) fn new(u: u8, v: u8) -> Self {
+        let u = i32::from(u) - 128;
+        let v = i32::from(v) - 128;
+        Self {
+            red: 403 * v,
+            green: -48 * u - 120 * v,
+            blue: 475 * u,
+        }
+    }
+
+    pub(crate) fn rgba(self, y: u8) -> [u8; 4] {
+        let luma = 256 * i32::from(y);
+        [
+            clamp_channel((luma + self.red) >> 8),
+            clamp_channel((luma + self.green) >> 8),
+            clamp_channel((luma + self.blue) >> 8),
+            0xFF,
+        ]
+    }
 }
 
 /// Converts a pixel with the forward transform of [MS-RDPEGFX] 3.3.8.3.1 ("Color Conversion").

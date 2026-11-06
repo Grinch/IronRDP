@@ -1,7 +1,6 @@
 use core::cmp;
 use std::io::{Read as _, Write as _};
 
-use byteorder::ReadBytesExt as _;
 use ironrdp_core::WriteCursor;
 
 /// Maximum possible segment size is 47 (run_length = 2, raw_bytes_count = 15), which is treated as
@@ -60,77 +59,65 @@ impl core::error::Error for RleEncodeError {}
 /// RLE-encoded color plane decoder implementation for RDP6 bitmap stream
 #[derive(Debug)]
 struct RlePlaneDecoder {
-    /// RDP6 performs per-scanline encoding, therefore segment decoder require state reset
-    /// for when each scanline is started (e.g. resetting last decoded byte value to 0)
-    last_decoded_byte: u8,
-
     width: usize,
     height: usize,
-
-    decoded_data: [u8; MAX_DECODED_SEGMENT_SIZE],
-    decoded_data_len: usize,
 }
 
 impl RlePlaneDecoder {
     fn new(width: usize, height: usize) -> Self {
-        Self {
-            last_decoded_byte: 0,
-            width,
-            height,
-            decoded_data: [0; MAX_DECODED_SEGMENT_SIZE],
-            decoded_data_len: 0,
-        }
+        Self { width, height }
     }
 
-    fn decompress_next_segment(&mut self, mut src: &[u8]) -> Result<usize, RleDecodeError> {
-        let control_byte = src.read_u8().map_err(RleDecodeError::ReadCompressedData)?;
-
-        if control_byte == 0 {
-            return Err(RleDecodeError::InvalidSegmentHeader);
-        }
-
-        let rle_bytes_field = control_byte & 0x0F;
-        let raw_bytes_field = (control_byte >> 4) & 0x0F;
-
-        let (run_length, raw_bytes_count) = match rle_bytes_field {
-            1 => (16 + usize::from(raw_bytes_field), 0),
-            2 => (32 + usize::from(raw_bytes_field), 0),
-            rle_control => (usize::from(rle_control), usize::from(raw_bytes_field)),
-        };
-
-        self.decoded_data_len = raw_bytes_count + run_length;
-
-        src.read_exact(&mut self.decoded_data[..raw_bytes_count])
-            .map_err(RleDecodeError::ReadCompressedData)?;
-
-        if raw_bytes_count > 0 {
-            // save last decoded byte for the next segments decoding
-            self.last_decoded_byte = self.decoded_data[raw_bytes_count - 1];
-        }
-
-        self.decoded_data[raw_bytes_count..self.decoded_data_len].fill(self.last_decoded_byte);
-
-        Ok(raw_bytes_count + 1)
-    }
-
-    /// Decodes single RLE-encoded scanline, without performing delta transformation
-    fn decode_scanline(&mut self, src: &[u8], mut dst: &mut [u8]) -> Result<usize, RleDecodeError> {
+    /// Decodes single RLE-encoded scanline into the start of `dst`, without performing delta
+    /// transformation
+    fn decode_scanline(&self, src: &[u8], dst: &mut [u8]) -> Result<usize, RleDecodeError> {
         let mut decoded_columns = 0;
         let mut read_bytes = 0;
 
-        self.last_decoded_byte = 0;
+        // RDP6 encodes each scanline on its own, so a run at its start repeats 0.
+        let mut last_decoded_byte = 0;
 
         while decoded_columns < self.width {
-            read_bytes += self.decompress_next_segment(&src[read_bytes..])?;
+            let control_byte = *src
+                .get(read_bytes)
+                .ok_or_else(|| RleDecodeError::ReadCompressedData(unexpected_eof()))?;
 
-            if decoded_columns + self.decoded_data_len > self.width {
+            if control_byte == 0 {
+                return Err(RleDecodeError::InvalidSegmentHeader);
+            }
+
+            let rle_bytes_field = control_byte & 0x0F;
+            let raw_bytes_field = (control_byte >> 4) & 0x0F;
+
+            let (run_length, raw_bytes_count) = match rle_bytes_field {
+                1 => (16 + usize::from(raw_bytes_field), 0),
+                2 => (32 + usize::from(raw_bytes_field), 0),
+                rle_control => (usize::from(rle_control), usize::from(raw_bytes_field)),
+            };
+
+            let raw = src
+                .get(read_bytes + 1..read_bytes + 1 + raw_bytes_count)
+                .ok_or_else(|| RleDecodeError::ReadCompressedData(unexpected_eof()))?;
+            read_bytes += 1 + raw_bytes_count;
+
+            if let Some(&last) = raw.last() {
+                // save last decoded byte for the next segments decoding
+                last_decoded_byte = last;
+            }
+
+            let segment_end = decoded_columns + raw_bytes_count + run_length;
+            if segment_end > self.width {
                 return Err(RleDecodeError::SegmentDoNotFitScanline);
             }
 
-            dst.write_all(&self.decoded_data[..self.decoded_data_len])
-                .map_err(RleDecodeError::WriteDecompressedData)?;
+            let segment = dst
+                .get_mut(decoded_columns..segment_end)
+                .ok_or_else(|| RleDecodeError::WriteDecompressedData(write_zero()))?;
+            let (raw_out, run_out) = segment.split_at_mut(raw_bytes_count);
+            raw_out.copy_from_slice(raw);
+            run_out.fill(last_decoded_byte);
 
-            decoded_columns += self.decoded_data_len;
+            decoded_columns = segment_end;
         }
 
         Ok(read_bytes)
@@ -157,7 +144,7 @@ impl RlePlaneDecoder {
             });
     }
 
-    fn decode(mut self, src: &[u8], dst: &mut [u8]) -> Result<usize, RleDecodeError> {
+    fn decode(self, src: &[u8], dst: &mut [u8]) -> Result<usize, RleDecodeError> {
         let mut read_bytes = 0;
 
         read_bytes += self.decode_scanline(src, dst)?;
@@ -175,6 +162,23 @@ impl RlePlaneDecoder {
 
         Ok(read_bytes)
     }
+}
+
+/// The error [`std::io::Read::read_exact`] gives when the compressed data ends early.
+fn unexpected_eof() -> std::io::Error {
+    let mut empty: &[u8] = &[];
+    empty
+        .read_exact(&mut [0])
+        .err()
+        .unwrap_or_else(|| std::io::ErrorKind::UnexpectedEof.into())
+}
+
+/// The error [`std::io::Write::write_all`] gives when the decompressed data does not fit.
+fn write_zero() -> std::io::Error {
+    let mut full: &mut [u8] = &mut [];
+    full.write_all(&[0])
+        .err()
+        .unwrap_or_else(|| std::io::ErrorKind::WriteZero.into())
 }
 
 /// Performs decompression of 8bpp color plane into slice.

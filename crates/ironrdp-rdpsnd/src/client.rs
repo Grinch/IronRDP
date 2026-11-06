@@ -562,6 +562,7 @@ impl AudioOutputClient {
         }
         match pdu::ServerAudioOutputPdu::decode(&mut ReadCursor::new(payload)) {
             Ok(pdu::ServerAudioOutputPdu::Wave2(pdu)) => {
+                debug!(?pdu, "Lossy-channel wave");
                 self.play(pdu.format_no, pdu.audio_timestamp, pdu.data);
                 Ok(vec![])
             }

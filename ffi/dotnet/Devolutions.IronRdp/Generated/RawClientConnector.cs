@@ -12,14 +12,41 @@ internal partial struct ClientConnector
     [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClientConnector_new", CallingConvention = CallingConvention.Cdecl)]
     internal static unsafe extern DiplomatResultClientConnectorIronRdpError New(Config* config, DiplomatSliceU8 clientAddr);
 
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClientConnector_with_redirection_support", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern DiplomatResultVoidIronRdpError WithRedirectionSupport(ClientConnector* handle);
+
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClientConnector_with_admin_session", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern DiplomatResultVoidIronRdpError WithAdminSession(ClientConnector* handle);
+
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClientConnector_with_redirected_session_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern DiplomatResultVoidIronRdpError WithRedirectedSessionId(ClientConnector* handle, uint sessionId);
+
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClientConnector_with_load_balance_info", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern DiplomatResultVoidIronRdpError WithLoadBalanceInfo(ClientConnector* handle, DiplomatSliceU8 loadBalanceInfo);
+
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClientConnector_with_redirection_password_cookie", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern DiplomatResultVoidIronRdpError WithRedirectionPasswordCookie(ClientConnector* handle, DiplomatSliceU8 cookie);
+
     [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClientConnector_with_static_channel_rdp_snd", CallingConvention = CallingConvention.Cdecl)]
     internal static unsafe extern DiplomatResultVoidIronRdpError WithStaticChannelRdpSnd(ClientConnector* handle);
+
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClientConnector_with_static_channel_rdp_snd_native", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern DiplomatResultVoidIronRdpError WithStaticChannelRdpSndNative(ClientConnector* handle);
+
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClientConnector_with_static_channel_rdp_snd_native_tapped", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern DiplomatResultVoidIronRdpError WithStaticChannelRdpSndNativeTapped(ClientConnector* handle, AudioTap* tap);
 
     [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClientConnector_with_static_channel_rdpdr", CallingConvention = CallingConvention.Cdecl)]
     internal static unsafe extern DiplomatResultVoidIronRdpError WithStaticChannelRdpdr(ClientConnector* handle, DiplomatSliceU8 computerName, uint smartCardDeviceId);
 
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClientConnector_with_static_channel_rdpdr_drives", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern DiplomatResultVoidIronRdpError WithStaticChannelRdpdrDrives(ClientConnector* handle, DiplomatSliceU8 computerName, DriveRedirection* drives);
+
     [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClientConnector_with_dynamic_channel_display_control", CallingConvention = CallingConvention.Cdecl)]
     internal static unsafe extern DiplomatResultVoidIronRdpError WithDynamicChannelDisplayControl(ClientConnector* handle);
+
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClientConnector_with_dynamic_channel_graphics_pipeline", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern DiplomatResultVoidIronRdpError WithDynamicChannelGraphicsPipeline(ClientConnector* handle, [MarshalAs(UnmanagedType.U1)] bool h264);
 
     [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClientConnector_with_dynamic_channel_rdpei", CallingConvention = CallingConvention.Cdecl)]
     internal static unsafe extern DiplomatResultVoidIronRdpError WithDynamicChannelRdpei(ClientConnector* handle, ushort maxTouchContacts, [MarshalAs(UnmanagedType.U1)] bool showTouchVisuals);

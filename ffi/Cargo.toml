@@ -11,6 +11,12 @@ doc = false
 test = false
 doctest = false
 
+[features]
+default = ["rdpsnd-native"]
+# Plays server audio on the local output device through CPAL (`ClientConnector::with_static_channel_rdp_snd_native`).
+# On Linux, CPAL links ALSA, so building needs the ALSA development files (`libasound2-dev`) and `pkg-config`.
+rdpsnd-native = ["dep:ironrdp-rdpsnd-native"]
+
 [dependencies]
 diplomat = { git = "https://github.com/Devolutions/diplomat", tag = "0.16.1-devo.2" }
 diplomat-runtime = { git = "https://github.com/Devolutions/diplomat", tag = "0.16.1-devo.2" }
@@ -18,6 +24,7 @@ ironrdp = { path = "../crates/ironrdp", features = ["session", "connector", "dvc
 ironrdp-cliprdr-native.path = "../crates/ironrdp-cliprdr-native"
 ironrdp-dvc-pipe-proxy.path = "../crates/ironrdp-dvc-pipe-proxy"
 ironrdp-core = { path = "../crates/ironrdp-core", features = ["alloc"] }
+ironrdp-egfx.path = "../crates/ironrdp-egfx"
 ironrdp-vmconnect = { path = "../crates/ironrdp-vmconnect" }
 ironrdp-rdcleanpath.path = "../crates/ironrdp-rdcleanpath"
 sspi = { version = "0.23", features = ["network_client"] }
@@ -26,8 +33,14 @@ tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1.0"
 
-[target.'cfg(windows)'.dependencies]
+[target.'cfg(any(windows, target_os = "linux", target_os = "macos"))'.dependencies]
 ironrdp-rdpdr-native.path = "../crates/ironrdp-rdpdr-native"
+# Opus is left out: its bundled build needs CMake. The server then picks PCM, ADPCM or G.711 (or AAC on Windows).
+ironrdp-rdpsnd-native = { path = "../crates/ironrdp-rdpsnd-native", default-features = false, features = ["aac"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+# Decodes the graphics pipeline's H.264 with the decoder Windows ships (`ClientConnector::with_dynamic_channel_graphics_pipeline`).
+ironrdp-egfx-native.path = "../crates/ironrdp-egfx-native"
 
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3.0"

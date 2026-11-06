@@ -13,6 +13,26 @@ public partial class ClipboardFormatId
 
     private static readonly unsafe RustDestructor<Raw.ClipboardFormatId> _destroy = Raw.ClipboardFormatId.Destroy;
 
+    public uint Value
+    {
+        get
+        {
+            unsafe
+            {
+                BorrowLease<Raw.ClipboardFormatId>? selfLease = null;
+                try
+                {
+                    selfLease = _diplomatHandle.Lease(BorrowKind.Shared);
+                    return Raw.ClipboardFormatId.GetValue(selfLease!.Ptr);
+                }
+                finally
+                {
+                    selfLease?.Release();
+                }
+            }
+        }
+    }
+
     /// <summary>
     /// Creates a managed <c>ClipboardFormatId</c> from a raw handle.
     /// </summary>
@@ -54,6 +74,18 @@ public partial class ClipboardFormatId
                 throw new ObjectDisposedException("ClipboardFormatId");
             }
             return inner;
+        }
+    }
+
+    /// <returns>
+    /// A <c>ClipboardFormatId</c> allocated on Rust side.
+    /// </returns>
+    public static ClipboardFormatId New(uint id)
+    {
+        unsafe
+        {
+            Raw.ClipboardFormatId* result = Raw.ClipboardFormatId.New(id);
+            return new ClipboardFormatId(result);
         }
     }
 

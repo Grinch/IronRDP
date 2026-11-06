@@ -22,7 +22,6 @@ pub mod subband_reconstruction;
 pub mod zgfx;
 
 mod bit_reader;
-mod utils;
 
 #[cfg(feature = "__test")]
 pub use bit_reader::BitReader;

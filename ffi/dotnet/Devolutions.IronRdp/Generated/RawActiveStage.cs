@@ -66,6 +66,12 @@ internal partial struct ActiveStage
     [DllImport(DiplomatNativeLib.Name, EntryPoint = "ActiveStage_encoded_resize", CallingConvention = CallingConvention.Cdecl)]
     internal static unsafe extern DiplomatResultActiveStageOutputIteratorIronRdpError EncodedResize(ActiveStage* handle, uint width, uint height);
 
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ActiveStage_encoded_resize_with_scale", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern DiplomatResultActiveStageOutputIteratorIronRdpError EncodedResizeWithScale(ActiveStage* handle, uint width, uint height, uint scaleFactor);
+
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ActiveStage_encoded_monitor_layout", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern DiplomatResultActiveStageOutputIteratorIronRdpError EncodedMonitorLayout(ActiveStage* handle, DisplayMonitorLayout* layout);
+
     [DllImport(DiplomatNativeLib.Name, EntryPoint = "ActiveStage_set_fastpath_processor", CallingConvention = CallingConvention.Cdecl)]
     internal static unsafe extern void SetFastpathProcessor(ActiveStage* handle, ushort ioChannelId, ushort userChannelId, uint shareId, [MarshalAs(UnmanagedType.U1)] bool enableServerPointer, [MarshalAs(UnmanagedType.U1)] bool pointerSoftwareRendering);
 

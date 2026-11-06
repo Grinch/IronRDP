@@ -13,10 +13,13 @@ pub mod capture;
 pub mod cpal;
 pub mod device;
 pub mod error;
+pub mod output;
 #[cfg(windows)]
 mod session_volume;
+pub mod tap;
 
 #[cfg(feature = "capture")]
 pub use capture::{RdpeaiCaptureBackend, is_pcm_capture_format, take_capture_packets};
 pub use device::{AudioDeviceInfo, DeviceSelector, Direction, list_devices};
 pub use error::{RdpsndNativeError, RdpsndNativeErrorKind, RdpsndNativeResult};
+pub use tap::{AudioChunk, AudioTap};

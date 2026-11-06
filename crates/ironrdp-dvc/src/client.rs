@@ -270,6 +270,17 @@ impl DrdynvcClient {
         self
     }
 
+    /// Registers a dynamic virtual channel whose processor is recreated by `factory` each time
+    /// the server opens the channel, as [`DrdynvcClient::with_dynamic_channel_factory`] does, on a
+    /// client already attached to the connector.
+    pub fn attach_dynamic_channel_factory<T, F>(&mut self, channel_name: impl Into<DynamicChannelName>, factory: F)
+    where
+        T: DvcClientProcessor + 'static,
+        F: FnMut() -> T + Send + 'static,
+    {
+        self.dynamic_channels.register_factory(channel_name.into(), factory);
+    }
+
     pub fn attach_established_dynamic_channel<T>(&mut self, channel_id: DynamicChannelId, channel: T) -> PduResult<()>
     where
         T: DvcClientProcessor + 'static,

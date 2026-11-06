@@ -212,12 +212,12 @@ pub mod ffi {
             &mut self,
             formats: &ClipboardFormatIterator,
         ) -> Result<Box<VecU8>, Box<IronRdpError>> {
-            let formats = formats.0.clone();
             let clipboard = self
                 .0
                 .get_svc_processor_mut::<ironrdp::cliprdr::CliprdrClient>()
                 .ok_or("clipboard svc processor not found in active stage")?;
 
+            let formats = crate::clipboard::callback::local_formats(clipboard, &formats.0);
             let result = clipboard.initiate_copy(&formats)?;
 
             let frame = self.0.process_svc_processor_messages(result)?;
@@ -225,6 +225,10 @@ pub mod ffi {
             Ok(Box::new(VecU8(frame)))
         }
 
+        /// Requests the remote clipboard's data in `format_id`, returning the frame to send.
+        ///
+        /// With `CallbackCliprdr`, the answer arrives as a `FormatDataResponse` event naming
+        /// `format_id`; the frame is empty when the paste failed at once.
         pub fn initiate_clipboard_paste(
             &mut self,
             format_id: &ClipboardFormatId,
@@ -235,7 +239,7 @@ pub mod ffi {
                 .get_svc_processor_mut::<ironrdp::cliprdr::CliprdrClient>()
                 .ok_or("clipboard svc processor not found in active stage")?;
 
-            let result = clipboard.initiate_paste(format_id)?;
+            let result = crate::clipboard::callback::initiate_paste(clipboard, format_id)?;
 
             let frame = self.0.process_svc_processor_messages(result)?;
 
@@ -282,7 +286,7 @@ pub mod ffi {
                 Message::SendInitiateCopy(formats) => clipboard.initiate_copy(formats)?,
                 Message::SendInitiateFileCopy(files) => clipboard.initiate_file_copy(files.clone())?,
                 Message::SendFormatData(response) => clipboard.submit_format_data(response.clone())?,
-                Message::SendInitiatePaste(format) => clipboard.initiate_paste(*format)?,
+                Message::SendInitiatePaste(format) => crate::clipboard::callback::initiate_paste(clipboard, *format)?,
                 Message::SendFileContentsRequest(request) => clipboard.request_file_contents(request.clone())?,
                 Message::SendFileContentsResponse(response) => clipboard.submit_file_contents(response.clone())?,
                 Message::Error(error) => {
@@ -489,6 +493,50 @@ pub mod ffi {
                 .transpose()?)
         }
 
+        /// Encodes a resize request like `encoded_resize`, asking the server to scale its desktop by `scale_factor`
+        /// percent, clamped to 100 to 500, with the matching device scale factor of 100, 140 or 180
+        /// ([MS-RDPEDISP] 2.2.2.2.1).
+        ///
+        /// [MS-RDPEDISP]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpedisp/
+        pub fn encoded_resize_with_scale(
+            &mut self,
+            width: u32,
+            height: u32,
+            scale_factor: u32,
+        ) -> Result<Option<Box<ActiveStageOutputIterator>>, Box<IronRdpError>> {
+            let (width, height) = ironrdp::displaycontrol::pdu::MonitorLayoutEntry::adjust_display_size(width, height);
+            Ok(self
+                .0
+                .encode_resize(width, height, Some(scale_factor), None)
+                .transpose()?
+                .map(|frame| {
+                    Box::new(ActiveStageOutputIterator(
+                        vec![ironrdp::session::ActiveStageOutput::ResponseFrame(frame)].into(),
+                    ))
+                }))
+        }
+
+        /// Encodes a request for the Display Control Virtual Channel to change to the monitors of `layout`.
+        ///
+        /// The layout must have exactly one primary monitor, no overlapping monitors, and every monitor touching
+        /// another ([MS-RDPEDISP] 2.2.2.2); monitors past the server's `max_num_monitors` are dropped.
+        /// Returns `None` while `display_control_state` is not `Ready`.
+        /// Fails when the layout breaks a rule above or covers more than the server's `max_monitor_area`; keep the
+        /// current layout then.
+        ///
+        /// [MS-RDPEDISP]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpedisp/
+        pub fn encoded_monitor_layout(
+            &mut self,
+            layout: &DisplayMonitorLayout,
+        ) -> Result<Option<Box<ActiveStageOutputIterator>>, Box<IronRdpError>> {
+            let layout = ironrdp::displaycontrol::pdu::DisplayControlMonitorLayout::new(&layout.0)?;
+            Ok(self.0.encode_monitor_layout(&layout).transpose()?.map(|frame| {
+                Box::new(ActiveStageOutputIterator(
+                    vec![ironrdp::session::ActiveStageOutput::ResponseFrame(frame)].into(),
+                ))
+            }))
+        }
+
         pub fn set_fastpath_processor(
             &mut self,
             io_channel_id: u16,
@@ -600,6 +648,84 @@ pub mod ffi {
         #[diplomat::attr(auto, getter = "max_monitor_area")]
         pub fn get_max_monitor_area(&self) -> u64 {
             self.0.max_monitor_area()
+        }
+    }
+
+    /// The monitors of a DISPLAYCONTROL_MONITOR_LAYOUT_PDU ([MS-RDPEDISP] 2.2.2.2), for
+    /// `ActiveStage::encoded_monitor_layout`.
+    ///
+    /// [MS-RDPEDISP]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpedisp/
+    #[diplomat::opaque_mut]
+    #[derive(Default)]
+    pub struct DisplayMonitorLayout(pub Vec<ironrdp::displaycontrol::pdu::MonitorLayoutEntry>);
+
+    impl DisplayMonitorLayout {
+        pub fn new() -> Box<DisplayMonitorLayout> {
+            Box::<DisplayMonitorLayout>::default()
+        }
+
+        /// Adds a monitor of `width` x `height` pixels with its upper-left corner at (`left`, `top`).
+        ///
+        /// Unlike `ConfigBuilder::add_monitor`, this takes a size rather than inclusive bounds, as
+        /// [MS-RDPEDISP] 2.2.2.2.1 does.
+        /// The width and height must be 200 to 8192 pixels, and an odd width is rounded down to an even one.
+        /// The primary monitor must be at (0, 0).
+        /// Fails when one of these does not hold; the layout as a whole is checked by `encoded_monitor_layout`.
+        ///
+        /// [MS-RDPEDISP]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpedisp/
+        pub fn add_monitor(
+            &mut self,
+            left: i32,
+            top: i32,
+            width: u32,
+            height: u32,
+            is_primary: bool,
+        ) -> Result<(), Box<IronRdpError>> {
+            use ironrdp::displaycontrol::pdu::MonitorLayoutEntry;
+
+            let entry = if is_primary {
+                MonitorLayoutEntry::new_primary(width, height)?
+            } else {
+                MonitorLayoutEntry::new_secondary(width, height)?
+            };
+            self.0.push(entry.with_position(left, top)?);
+            Ok(())
+        }
+
+        /// Adds a monitor like `add_monitor`, scaled by `scale_factor` percent, 100 to 500, with the matching device
+        /// scale factor of 100, 140 or 180 ([MS-RDPEDISP] 2.2.2.2.1).
+        /// Fails as `add_monitor` does, or for a factor out of range.
+        ///
+        /// [MS-RDPEDISP]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpedisp/
+        pub fn add_monitor_with_scale(
+            &mut self,
+            left: i32,
+            top: i32,
+            width: u32,
+            height: u32,
+            is_primary: bool,
+            scale_factor: u32,
+        ) -> Result<(), Box<IronRdpError>> {
+            use ironrdp::displaycontrol::pdu::{DeviceScaleFactor, MonitorLayoutEntry};
+
+            let entry = if is_primary {
+                MonitorLayoutEntry::new_primary(width, height)?
+            } else {
+                MonitorLayoutEntry::new_secondary(width, height)?
+            };
+            self.0.push(
+                entry
+                    .with_position(left, top)?
+                    .with_desktop_scale_factor(scale_factor)?
+                    .with_device_scale_factor(DeviceScaleFactor::from_desktop_scale_factor(scale_factor)),
+            );
+            Ok(())
+        }
+
+        /// The number of monitors added.
+        #[diplomat::attr(auto, getter = "count")]
+        pub fn get_count(&self) -> usize {
+            self.0.len()
         }
     }
 
@@ -851,6 +977,19 @@ mod tests {
 
     use super::ffi::{ActiveStageOutput, ActiveStageOutputIterator, ActiveStageOutputType};
     use crate::error::ffi::IronRdpErrorKind;
+
+    #[test]
+    fn display_monitor_layout_rejects_monitors_the_channel_cannot_carry() {
+        let mut layout = super::ffi::DisplayMonitorLayout::new();
+
+        assert!(layout.add_monitor(10, 0, 1920, 1080, true).is_err());
+        assert!(layout.add_monitor(0, 0, 100, 1080, true).is_err());
+        assert!(layout.add_monitor(0, 0, 1920, 9000, true).is_err());
+        assert!(layout.add_monitor(0, 0, 1920, 1080, true).is_ok());
+        assert!(layout.add_monitor(-1280, 0, 1280, 1024, false).is_ok());
+        assert_eq!(layout.get_count(), 2);
+        assert!(ironrdp::displaycontrol::pdu::DisplayControlMonitorLayout::new(&layout.0).is_ok());
+    }
 
     #[test]
     fn active_stage_output_iterator_preserves_response_frame_order() {
