@@ -26,6 +26,18 @@ Read `ActiveStage.DisplayControlState` after each `Process` call: it moves from 
 `Unavailable` means the channel was not requested.
 `ActiveStage.DisplayControlCapabilities` exposes the server's monitor count and area limits once `Ready`.
 
+## Audio playback
+
+`connector.WithStaticChannelRdpSndNative()` plays the server's audio on the default output device of Windows, macOS and Linux, through CPAL.
+It also offers the `AUDIO_PLAYBACK_DVC` and `AUDIO_PLAYBACK_LOSSY_DVC` dynamic channels, which Windows 8 and later prefer, as mstsc does.
+On the legacy bitmap path a resize is a Deactivation-Reactivation Sequence, after which Windows 11 may stop sending audio for the rest of the session, on either channel; mstsc avoids it by resizing through the graphics pipeline ([MS-RDPEGFX]).
+`WithStaticChannelRdpSnd()` attaches the channel with a backend that discards the audio; attach one or the other.
+`ConfigBuilder.EnableAudioPlayback` (on by default) tells the server whether to send audio at all.
+Windows servers start audio only once the client has the RDPDR channel as well.
+The native library needs the `rdpsnd-native` feature, on by default; on Linux, building it needs the ALSA development files (`libasound2-dev`) and `pkg-config`.
+Without the feature, `WithStaticChannelRdpSndNative` throws `IronRdpException` with the `WrongOS` kind.
+Opus is not offered, so the server sends PCM, ADPCM or G.711, or AAC to a Windows client.
+
 ## Touch and pen input (MS-RDPEI)
 
 - Attach the channel before connecting: `connector.WithDynamicChannelRdpei(maxTouchContacts, showTouchVisuals)`.
@@ -56,3 +68,4 @@ Read `ActiveStage.DisplayControlState` after each `Process` call: it moves from 
 
 [Diplomat]: https://github.com/rust-diplomat/diplomat
 [MS-RDPEDISP]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpedisp
+[MS-RDPEGFX]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx

@@ -15,6 +15,9 @@ internal partial struct ClientConnector
     [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClientConnector_with_static_channel_rdp_snd", CallingConvention = CallingConvention.Cdecl)]
     internal static unsafe extern DiplomatResultVoidIronRdpError WithStaticChannelRdpSnd(ClientConnector* handle);
 
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClientConnector_with_static_channel_rdp_snd_native", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern DiplomatResultVoidIronRdpError WithStaticChannelRdpSndNative(ClientConnector* handle);
+
     [DllImport(DiplomatNativeLib.Name, EntryPoint = "ClientConnector_with_static_channel_rdpdr", CallingConvention = CallingConvention.Cdecl)]
     internal static unsafe extern DiplomatResultVoidIronRdpError WithStaticChannelRdpdr(ClientConnector* handle, DiplomatSliceU8 computerName, uint smartCardDeviceId);
 

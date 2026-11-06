@@ -72,6 +72,9 @@ internal partial struct ConfigBuilder
     [DllImport(DiplomatNativeLib.Name, EntryPoint = "ConfigBuilder_set_dvc_pipe_proxy", CallingConvention = CallingConvention.Cdecl)]
     internal static unsafe extern void SetDvcPipeProxy(ConfigBuilder* handle, DvcPipeProxyConfig* dvcPipeProxy);
 
+    [DllImport(DiplomatNativeLib.Name, EntryPoint = "ConfigBuilder_set_enable_audio_playback", CallingConvention = CallingConvention.Cdecl)]
+    internal static unsafe extern void SetEnableAudioPlayback(ConfigBuilder* handle, [MarshalAs(UnmanagedType.U1)] bool enableAudioPlayback);
+
     [DllImport(DiplomatNativeLib.Name, EntryPoint = "ConfigBuilder_build", CallingConvention = CallingConvention.Cdecl)]
     internal static unsafe extern DiplomatResultConfigIronRdpError Build(ConfigBuilder* handle);
 

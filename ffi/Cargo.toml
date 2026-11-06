@@ -11,6 +11,12 @@ doc = false
 test = false
 doctest = false
 
+[features]
+default = ["rdpsnd-native"]
+# Plays server audio on the local output device through CPAL (`ClientConnector::with_static_channel_rdp_snd_native`).
+# On Linux, CPAL links ALSA, so building needs the ALSA development files (`libasound2-dev`) and `pkg-config`.
+rdpsnd-native = ["dep:ironrdp-rdpsnd-native"]
+
 [dependencies]
 diplomat = { git = "https://github.com/Devolutions/diplomat", tag = "0.17.0-devo.1" }
 diplomat-runtime = { git = "https://github.com/Devolutions/diplomat", tag = "0.17.0-devo.1" }
@@ -28,6 +34,10 @@ anyhow = "1.0"
 
 [target.'cfg(windows)'.dependencies]
 ironrdp-rdpdr-native.path = "../crates/ironrdp-rdpdr-native"
+
+[target.'cfg(any(windows, target_os = "linux", target_os = "macos"))'.dependencies]
+# Opus is left out: its bundled build needs CMake. The server then picks PCM, ADPCM or G.711 (or AAC on Windows).
+ironrdp-rdpsnd-native = { path = "../crates/ironrdp-rdpsnd-native", default-features = false, features = ["aac"], optional = true }
 
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3.0"

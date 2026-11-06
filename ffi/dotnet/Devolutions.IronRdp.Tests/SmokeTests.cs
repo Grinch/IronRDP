@@ -420,6 +420,27 @@ internal static class SmokeTests
             True(error.Message.Contains("credentials not set"), $"error message: {error.Message}");
         });
 
+        // oracle: ffi/README.md "Audio playback"
+        yield return ("native audio playback attaches before connecting", () =>
+        {
+            var builder = ConfigBuilder.New();
+            builder.WithUsernameAndPassword("user", "password");
+            builder.SetDesktopSize(600, 800);
+            builder.ClientName = "smoke-tests";
+            builder.ClientDir = "C:\\Windows\\System32\\mstscax.dll";
+            builder.EnableTls = true;
+            builder.EnableCredssp = false;
+            builder.PerformanceFlags = PerformanceFlags.NewDefault();
+            builder.EnableAudioPlayback = false;
+            builder.EnableAudioPlayback = true;
+
+            var connector = ClientConnector.New(builder.Build(), "127.0.0.1:33890");
+            connector.WithStaticChannelRdpSndNative();
+
+            var buf = WriteBuf.New();
+            True(connector.StepNoInput(buf).Size.IsSome(), "the connector still starts the connection");
+        });
+
         yield return ("connector sends an X.224 request and accepts the confirm", () =>
         {
             var config = TlsConfig();

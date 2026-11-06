@@ -225,6 +225,15 @@ pub mod ffi {
             self.dvc_pipe_proxy = Some(dvc_pipe_proxy.clone());
         }
 
+        /// Whether the server may send audio to play on this client; on by default.
+        ///
+        /// When off, the Client Info PDU sets `INFO_NOAUDIOPLAYBACK` and the server sends no audio.
+        /// Playing the audio also needs an RDPSND channel, such as `ClientConnector::with_static_channel_rdp_snd_native`.
+        #[diplomat::attr(auto, setter = "enable_audio_playback")]
+        pub fn set_enable_audio_playback(&mut self, enable_audio_playback: bool) {
+            self.no_audio_playback = Some(!enable_audio_playback);
+        }
+
         pub fn build(&self) -> Result<Box<Config>, Box<IronRdpError>> {
             let connector = ironrdp::connector::Config {
                 credentials: self.credentials.clone().ok_or("credentials not set")?,
@@ -389,5 +398,26 @@ mod tests {
                 .iter()
                 .any(|codec| matches!(codec.property, CodecProperty::RemoteFx(_)))
         );
+    }
+
+    #[test]
+    fn audio_playback_setter_maps_to_the_no_audio_playback_flag() {
+        let mut builder = super::ffi::ConfigBuilder::new();
+        builder.with_username_and_password("user", "password");
+        builder.set_desktop_size(768, 1024);
+        builder.set_client_name("client");
+        builder.set_client_dir("C:\\");
+        builder.set_performance_flags(&super::ffi::PerformanceFlags::new_default());
+
+        let Ok(config) = builder.build() else {
+            panic!("a builder with every required field should build");
+        };
+        assert!(config.connector.enable_audio_playback);
+
+        builder.set_enable_audio_playback(false);
+        let Ok(config) = builder.build() else {
+            panic!("a builder with every required field should build");
+        };
+        assert!(!config.connector.enable_audio_playback);
     }
 }

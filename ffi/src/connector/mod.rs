@@ -55,6 +55,52 @@ pub mod ffi {
             Ok(())
         }
 
+        /// Attaches the RDPSND channel ([MS-RDPEA]) with a backend that plays the server's audio on the local
+        /// default output device, following it when the system default changes.
+        /// The `AUDIO_PLAYBACK_DVC` and `AUDIO_PLAYBACK_LOSSY_DVC` dynamic channels are registered as well, as
+        /// mstsc offers them; Windows 8 and later play over those instead of the static channel.
+        ///
+        /// Use this or `with_static_channel_rdp_snd`, not both. Audio playback must stay enabled in the config
+        /// (`ConfigBuilder::set_enable_audio_playback`, on by default).
+        /// The client offers PCM, plus AAC on Windows; the server also picks ADPCM or G.711 from its own list.
+        /// Playback runs on a thread of its own, so the session loop needs no extra calls.
+        ///
+        /// Available on Windows (WASAPI), macOS (Core Audio) and Linux (ALSA).
+        /// Fails with `WrongOS` elsewhere, and on a native library built without the `rdpsnd-native` feature.
+        ///
+        /// [MS-RDPEA]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpea/
+        pub fn with_static_channel_rdp_snd_native(&mut self) -> Result<(), Box<IronRdpError>> {
+            #[cfg(all(feature = "rdpsnd-native", any(windows, target_os = "linux", target_os = "macos")))]
+            {
+                let Some(connector) = self.0.take() else {
+                    return Err(ValueConsumedError::for_item("connector").into());
+                };
+                let backend = ironrdp_rdpsnd_native::cpal::RdpsndBackend::new();
+                self.0 = Some(connector.with_static_channel(ironrdp::rdpsnd::client::Rdpsnd::new(Box::new(backend))));
+
+                // Windows 8 and later prefer the dynamic channels, as mstsc uses them, and keep playing over them
+                // after a Deactivate-Reactivate (a resize); over the static channel the audio stops there for good.
+                // The server opens one path, so each gets a backend of its own, which opens the device only
+                // once its formats are negotiated.
+                use ironrdp::rdpsnd::client::{DVC_CHANNEL_NAME, LOSSY_DVC_CHANNEL_NAME, RdpsndDvcState};
+                let origin = std::time::Instant::now();
+                let state = RdpsndDvcState::new(Box::new(ironrdp_rdpsnd_native::cpal::RdpsndBackend::new()))
+                    .with_clock(Box::new(move || origin.elapsed()));
+                let lossy = state.clone();
+                let drdynvc = self.drdynvc_mut()?;
+                drdynvc.attach_dynamic_channel_factory(DVC_CHANNEL_NAME, move || state.channel());
+                drdynvc.attach_dynamic_channel_factory(LOSSY_DVC_CHANNEL_NAME, move || lossy.lossy_channel());
+                Ok(())
+            }
+
+            #[cfg(not(all(feature = "rdpsnd-native", any(windows, target_os = "linux", target_os = "macos"))))]
+            {
+                Err(crate::error::WrongOSError::expected_platform("windows, linux or macos")
+                    .with_custom_message("native audio playback is not available in this build: ")
+                    .into())
+            }
+        }
+
         // FIXME: We need to create opaque for ironrdp::rdpdr::Rdpdr
         /// Must use
         ///
@@ -97,23 +143,26 @@ pub mod ffi {
         where
             T: DvcClientProcessor + 'static,
         {
+            self.drdynvc_mut()?.attach_dynamic_channel(processor);
+            Ok(())
+        }
+
+        /// The DRDYNVC channel, attached first if it isn't yet.
+        fn drdynvc_mut(&mut self) -> Result<&mut ironrdp::dvc::DrdynvcClient, Box<IronRdpError>> {
             let Some(connector) = &mut self.0 else {
                 return Err(ValueConsumedError::for_item("connector").into());
             };
 
-            let drdynvc = match connector.get_static_channel_processor_mut::<ironrdp::dvc::DrdynvcClient>() {
-                Some(processor) => processor,
-                None => {
-                    connector.attach_static_channel(ironrdp::dvc::DrdynvcClient::new());
-                    connector
-                        .get_static_channel_processor_mut::<ironrdp::dvc::DrdynvcClient>()
-                        .expect("DrdynvcClient should be initialized above")
-                }
-            };
+            if connector
+                .get_static_channel_processor::<ironrdp::dvc::DrdynvcClient>()
+                .is_none()
+            {
+                connector.attach_static_channel(ironrdp::dvc::DrdynvcClient::new());
+            }
 
-            drdynvc.attach_dynamic_channel(processor);
-
-            Ok(())
+            Ok(connector
+                .get_static_channel_processor_mut::<ironrdp::dvc::DrdynvcClient>()
+                .expect("DrdynvcClient should be initialized above"))
         }
 
         pub fn with_dynamic_channel_display_control(&mut self) -> Result<(), Box<IronRdpError>> {

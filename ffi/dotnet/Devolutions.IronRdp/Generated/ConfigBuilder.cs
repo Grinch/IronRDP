@@ -201,6 +201,26 @@ public partial class ConfigBuilder
         }
     }
 
+    public bool EnableAudioPlayback
+    {
+        set
+        {
+            unsafe
+            {
+                BorrowLease<Raw.ConfigBuilder>? selfLease = null;
+                try
+                {
+                    selfLease = _diplomatHandle.Lease(BorrowKind.Exclusive);
+                    Raw.ConfigBuilder.SetEnableAudioPlayback(selfLease!.Ptr, value);
+                }
+                finally
+                {
+                    selfLease?.Release();
+                }
+            }
+        }
+    }
+
     public bool EnableCredssp
     {
         set
