@@ -482,6 +482,99 @@ internal static class SmokeTests
             True(resize!.Next() is { EnumType: ActiveStageOutputType.ResponseFrame }, "resize is a response frame");
         });
 
+        // oracle: spec MS-RDPBCGR §2.2.1.3.2 (earlyCapabilityFlags RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL = 0x0100 in Client Core Data)
+        yield return ("the graphics pipeline is announced in the client core data", () =>
+        {
+            var without = new List<byte[]>();
+            var with = new List<byte[]>();
+            ConnectedStage(8, 4, displayControl: true, written: without);
+            ConnectedStage(8, 4, displayControl: true, graphicsPipeline: true, written: with);
+            Equal(without.Count, with.Count, "frames the client sends");
+
+            var differences = new List<(byte Without, byte With)>();
+            for (int frame = 0; frame < with.Count; frame++)
+            {
+                Equal(without[frame].Length, with[frame].Length, $"frame {frame} length");
+                for (int offset = 0; offset < with[frame].Length; offset++)
+                {
+                    if (without[frame][offset] != with[frame][offset])
+                    {
+                        differences.Add((without[frame][offset], with[frame][offset]));
+                    }
+                }
+            }
+
+            Equal(1, differences.Count, "bytes that differ");
+            Equal(0x01, differences[0].With ^ differences[0].Without, "the high byte of the early capability flags changes by 0x01");
+            Equal(0x01, differences[0].With & 0x01, "the flag is set, not cleared");
+        });
+
+        // oracle: spec MS-RDPEGFX §3.3.5.1 (the client sends RDPGFX_CAPS_ADVERTISE_PDU, cmdId 0x0012, once the channel
+        // opens) and §2.2.3.1 (RDPGFX_CAPSET_VERSION8 = 0x00080004 needs no AVC decoder)
+        yield return ("the graphics pipeline offers only capability sets without AVC when told not to use H.264", () =>
+        {
+            var (stage, image) = ConnectedStage(8, 4, graphicsPipeline: true);
+            ProcessFrame(stage, image, DrdynvcServerPdu(DrdynvcCapsVersion1));
+            var responses = ProcessFrame(stage, image, DrdynvcServerPdu(DrdynvcGraphicsCreateRequest));
+            var advertise = responses.Where(o => o.EnumType == ActiveStageOutputType.ResponseFrame)
+                .Select(o => ToArray(o.ResponseFrame))
+                .Select(frame => (Frame: frame, At: IndexOf(frame, new byte[] { 0x12, 0x00, 0x00, 0x00 })))
+                .Where(found => found.At >= 0)
+                .ToList();
+
+            Equal(1, advertise.Count, "frames carrying RDPGFX_CAPS_ADVERTISE_PDU");
+            var (bytes, at) = advertise[0];
+            Equal((ushort)1, BitConverter.ToUInt16(bytes, at + 8), "capability sets");
+            Equal(0x00080004u, BitConverter.ToUInt32(bytes, at + 10), "capability set version");
+        });
+
+        // oracle: spec MS-RDPEGFX §2.2.2.14 (RDPGFX_RESET_GRAPHICS_PDU sets the output size), §2.2.2.4 (RDPGFX_SOLIDFILL_PDU
+        // fills exclusive rectangles with a B, G, R, XA color) and §3.3.5.12 (the client answers RDPGFX_END_FRAME_PDU with
+        // RDPGFX_FRAME_ACKNOWLEDGE_PDU, cmdId 0x000D, naming the frame)
+        yield return ("a graphics reset resizes the image in place and repaints all of it", () =>
+        {
+            var (stage, image) = ConnectedStage(8, 4, graphicsPipeline: true);
+            ProcessFrame(stage, image, DrdynvcServerPdu(DrdynvcCapsVersion1));
+            ProcessFrame(stage, image, DrdynvcServerPdu(DrdynvcGraphicsCreateRequest));
+            ProcessFrame(stage, image, GraphicsServerPdu(GfxCapsConfirmVersion8));
+
+            var outputs = ProcessFrame(stage, image, GraphicsServerPdu(
+                GfxResetGraphics(16, 6),
+                // RDPGFX_CREATE_SURFACE_PDU: surface 1, 16 x 6, PIXEL_FORMAT_XRGB_8888.
+                GfxPdu(0x0009, 0x01, 0x00, 0x10, 0x00, 0x06, 0x00, 0x20),
+                // RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU: surface 1 at (0, 0).
+                GfxPdu(0x000F, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00),
+                // RDPGFX_START_FRAME_PDU: timestamp 0, frame 7.
+                GfxPdu(0x000B, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00),
+                // RDPGFX_SOLIDFILL_PDU: surface 1, B 0x30 G 0x20 R 0x10, one rectangle (0, 0)-(16, 6).
+                GfxPdu(0x0004, 0x01, 0x00, 0x30, 0x20, 0x10, 0xff, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x06, 0x00),
+                // RDPGFX_END_FRAME_PDU: frame 7.
+                GfxPdu(0x000C, 0x07, 0x00, 0x00, 0x00)));
+
+            Equal(16, (int)image.Width, "width after the reset");
+            Equal(6, (int)image.Height, "height after the reset");
+            True(outputs.All(o => o.EnumType != ActiveStageOutputType.DeactivateAll), "no reactivation");
+            var updates = outputs.Where(o => o.EnumType == ActiveStageOutputType.GraphicsUpdate).Select(o => o.GraphicsUpdate).ToList();
+            Equal(1, updates.Count, "graphics updates");
+            Equal((0, 0, 15, 5), ((int)updates[0].Left, (int)updates[0].Top, (int)updates[0].Right, (int)updates[0].Bottom), "update covers the image");
+
+            var pixels = new byte[(int)image.DataSize];
+            image.FillData(pixels);
+            for (int pixel = 0; pixel < 16 * 6; pixel++)
+            {
+                Equal(((byte)0x30, (byte)0x20, (byte)0x10), (pixels[pixel * 4], pixels[pixel * 4 + 1], pixels[pixel * 4 + 2]), $"pixel {pixel} (B, G, R)");
+            }
+
+            var acknowledge = new byte[] { 0x0d, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00 };
+            var acknowledged = outputs.Where(o => o.EnumType == ActiveStageOutputType.ResponseFrame)
+                .Select(o => ToArray(o.ResponseFrame))
+                .Select(frame => (Frame: frame, At: IndexOf(frame, acknowledge)))
+                .Where(found => found.At >= 0)
+                .ToList();
+            Equal(1, acknowledged.Count, "frames carrying RDPGFX_FRAME_ACKNOWLEDGE_PDU");
+            Equal(7u, BitConverter.ToUInt32(acknowledged[0].Frame, acknowledged[0].At + 12), "acknowledged frame");
+        });
+
         if (OperatingSystem.IsWindows())
         {
             yield return ("windows clipboard with file transfer starts idle", () =>
@@ -968,7 +1061,87 @@ internal static class SmokeTests
         },
     };
 
-    private static (ActiveStage Stage, DecodedImage Image) ConnectedStage(ushort width, ushort height, bool displayControl = false, bool rdpei = false)
+    // DYNVC_CAPS_VERSION1 (MS-RDPEDYC §2.2.1.1.1).
+    private static readonly byte[] DrdynvcCapsVersion1 = { 0x50, 0x00, 0x01, 0x00 };
+
+    // DYNVC_CREATE_REQ for "Microsoft::Windows::RDS::Graphics" as channel 1 (MS-RDPEDYC §2.2.2.1).
+    private static readonly byte[] DrdynvcGraphicsCreateRequest =
+        new byte[] { 0x10, 0x01 }.Concat(System.Text.Encoding.ASCII.GetBytes("Microsoft::Windows::RDS::Graphics\0")).ToArray();
+
+    // RDPGFX_CAPS_CONFIRM_PDU confirming RDPGFX_CAPSET_VERSION8 with no flags (MS-RDPEGFX §2.2.2.19, §2.2.3.1).
+    private static readonly byte[] GfxCapsConfirmVersion8 =
+        GfxPdu(0x0013, 0x04, 0x00, 0x08, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00);
+
+    // An RDPGFX PDU: RDPGFX_HEADER (cmdId, flags 0, pduLength) and its body (MS-RDPEGFX §2.2.1.5).
+    private static byte[] GfxPdu(ushort cmdId, params byte[] body)
+    {
+        var pdu = new List<byte>();
+        pdu.AddRange(BitConverter.GetBytes(cmdId));
+        pdu.AddRange(BitConverter.GetBytes((ushort)0));
+        pdu.AddRange(BitConverter.GetBytes(8 + body.Length));
+        pdu.AddRange(body);
+        return pdu.ToArray();
+    }
+
+    // RDPGFX_RESET_GRAPHICS_PDU with one primary monitor covering the output, padded to 340 bytes (MS-RDPEGFX §2.2.2.14).
+    private static byte[] GfxResetGraphics(uint width, uint height)
+    {
+        var body = new List<byte>();
+        body.AddRange(BitConverter.GetBytes(width));
+        body.AddRange(BitConverter.GetBytes(height));
+        body.AddRange(BitConverter.GetBytes(1u));
+        foreach (var value in new[] { 0u, 0u, width - 1, height - 1, 1u })
+        {
+            body.AddRange(BitConverter.GetBytes(value));
+        }
+
+        body.AddRange(new byte[340 - 8 - body.Count]);
+        return GfxPdu(0x000E, body.ToArray());
+    }
+
+    // RDPGFX PDUs on the graphics channel (1) in one uncompressed RDP_SEGMENTED_DATA segment (descriptor
+    // SEGMENTED_SINGLE, then an RDP8_BULK_ENCODED_DATA header of PACKET_COMPR_TYPE_RDP8 without PACKET_COMPRESSED,
+    // MS-RDPEGFX §2.2.5.1) inside a DYNVC_DATA (MS-RDPEDYC §2.2.3.2).
+    private static byte[] GraphicsServerPdu(params byte[][] pdus) =>
+        DrdynvcServerPdu(new byte[] { 0x30, 0x01, 0xe0, 0x04 }.Concat(pdus.SelectMany(pdu => pdu)).ToArray());
+
+    // A DRDYNVC PDU from the server on static channel 1004, in one Virtual Channel PDU with
+    // CHANNEL_FLAG_FIRST | CHANNEL_FLAG_LAST (MS-RDPBCGR §2.2.6.1) inside an MCS Send Data Indication.
+    private static byte[] DrdynvcServerPdu(byte[] data)
+    {
+        var channelData = new List<byte>();
+        channelData.AddRange(BitConverter.GetBytes(data.Length));
+        channelData.AddRange(BitConverter.GetBytes(3));
+        channelData.AddRange(data);
+
+        int length = channelData.Count;
+        byte[] perLength = length < 0x80 ? new[] { (byte)length } : new[] { (byte)(0x80 | length >> 8), (byte)length };
+        var mcs = new List<byte> { 0x02, 0xf0, 0x80, 0x68, 0x00, 0x01, 0x03, 0xec, 0x70 };
+        mcs.AddRange(perLength);
+        mcs.AddRange(channelData);
+
+        int total = 4 + mcs.Count;
+        var frame = new List<byte> { 0x03, 0x00, (byte)(total >> 8), (byte)total };
+        frame.AddRange(mcs);
+        return frame.ToArray();
+    }
+
+    private static int IndexOf(byte[] haystack, byte[] needle)
+    {
+        for (int i = 0; i + needle.Length <= haystack.Length; i++)
+        {
+            if (haystack.AsSpan(i, needle.Length).SequenceEqual(needle))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    // Adds each frame the client sends during the handshake to written, when given.
+    private static (ActiveStage Stage, DecodedImage Image) ConnectedStage(ushort width, ushort height, bool displayControl = false, bool rdpei = false,
+        bool graphicsPipeline = false, List<byte[]>? written = null)
     {
         var connector = ClientConnector.New(TlsConfig(), "127.0.0.1:33890");
         var serverPdus = HandshakeServerPdus.ToArray();
@@ -982,7 +1155,12 @@ internal static class SmokeTests
             connector.WithDynamicChannelRdpei(10, false);
         }
 
-        if (displayControl || rdpei)
+        if (graphicsPipeline)
+        {
+            connector.WithDynamicChannelGraphicsPipeline(false);
+        }
+
+        if (displayControl || rdpei || graphicsPipeline)
         {
             serverPdus[1] = McsConnectResponseWithDrdynvc;
         }
@@ -997,13 +1175,14 @@ internal static class SmokeTests
             }
 
             buf.Clear();
+            Written? sent = null;
             if (connector.ShouldPerformSecurityUpgrade())
             {
                 connector.MarkSecurityUpgradeAsDone();
             }
             else if (connector.NextPduHint() is null)
             {
-                connector.StepNoInput(buf);
+                sent = connector.StepNoInput(buf);
             }
             else if (i == serverPdus.Length)
             {
@@ -1011,7 +1190,14 @@ internal static class SmokeTests
             }
             else
             {
-                connector.Step(serverPdus[i++], buf);
+                sent = connector.Step(serverPdus[i++], buf);
+            }
+
+            if (written is not null && sent is not null && sent.Size.IsSome())
+            {
+                var bytes = new byte[(int)sent.Size.Get()];
+                buf.ReadIntoBuf(bytes);
+                written.Add(bytes);
             }
         }
 

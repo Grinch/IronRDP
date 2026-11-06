@@ -26,6 +26,14 @@ Read `ActiveStage.DisplayControlState` after each `Process` call: it moves from 
 `Unavailable` means the channel was not requested.
 `ActiveStage.DisplayControlCapabilities` exposes the server's monitor count and area limits once `Ready`.
 
+## Graphics pipeline
+
+`connector.WithDynamicChannelGraphicsPipeline(h264)` attaches the graphics pipeline ([MS-RDPEGFX]) and announces it in Client Core Data (`RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL`).
+A server that takes it draws through the pipeline, and `ActiveStage.Process` composites its surfaces into the `DecodedImage` and reports `GraphicsUpdate`s as before.
+A resize then comes as `RDPGFX_RESET_GRAPHICS_PDU` instead of `DeactivateAll`: the `DecodedImage` takes the new size in place, so compare its `Width` and `Height` after each `Process` call, and the next `GraphicsUpdate` covers all of it.
+A server that does not take it, or a client that does not attach it, stays on bitmap updates and `DeactivateAll`, so handle both.
+`h264` also offers the AVC420 and AVC444 capability sets on Windows, decoded by Media Foundation's H.264 decoder, which starts in the background and is waited for when the channel opens; if it does not start, or elsewhere, only the sets without AVC are offered, and the server sends RemoteFX Progressive, ClearCodec, Planar or uncompressed surfaces.
+
 ## Touch and pen input (MS-RDPEI)
 
 - Attach the channel before connecting: `connector.WithDynamicChannelRdpei(maxTouchContacts, showTouchVisuals)`.
@@ -56,3 +64,4 @@ Read `ActiveStage.DisplayControlState` after each `Process` call: it moves from 
 
 [Diplomat]: https://github.com/rust-diplomat/diplomat
 [MS-RDPEDISP]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpedisp
+[MS-RDPEGFX]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx
