@@ -97,8 +97,13 @@ use crate::pdu::{
 /// the same bound the RemoteFX Progressive path applies.
 const MAX_RFX_CLIPPING_WORK: usize = 1 << 20;
 
-/// Max capacity to keep for decompressed buffer when cleared.
-const MAX_DECOMPRESSED_BUFFER_CAPACITY: usize = 16384; // 16 KiB
+/// Capacity the decompressed-message buffer keeps between messages.
+///
+/// A full-screen frame decompresses to a few MiB, and regrowing the buffer to that from a small
+/// capacity for every message costs a reallocation and copy at each doubling. Up to this much is
+/// kept, so steady traffic reuses one allocation, while a rare oversized message does not hold its
+/// memory for the rest of the session.
+const MAX_DECOMPRESSED_BUFFER_CAPACITY: usize = 8 * 1024 * 1024;
 
 /// Upper bound on the decoders the client holds from [`GraphicsPipelineClient::with_h264_decoder_factory`].
 /// Each surface sending H.264 costs a decoder, and a server can create surfaces freely.
