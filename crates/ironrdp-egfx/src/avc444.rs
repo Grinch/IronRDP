@@ -196,23 +196,75 @@ impl Yuv444Frame {
         if !(left < right && top < bottom) {
             return Vec::new();
         }
-        let mut rgba = Vec::with_capacity((right - left) * (bottom - top) * 4);
-        for row in top..bottom {
+        let row_bytes = (right - left) * 4;
+        let mut rgba = vec![0; row_bytes * (bottom - top)];
+        for (row, out) in (top..bottom).zip(rgba.chunks_exact_mut(row_bytes)) {
             let line = row * self.stride;
-            for col in left..right {
-                let at = line + col;
-                let (mut u, mut v) = (self.u[at], self.v[at]);
-                if row % 2 == 0 && col % 2 == 0 {
-                    // The block's other three samples are inside the padded planes: `stride` and
-                    // `rows` are even, and so are `row` and `col`.
-                    let below = at + self.stride;
-                    u = reverse_filter(u, self.u[at + 1], self.u[below], self.u[below + 1]);
-                    v = reverse_filter(v, self.v[at + 1], self.v[below], self.v[below + 1]);
+            let pixels = line + left..line + right;
+            if row % 2 == 1 {
+                let samples = self.y[pixels.clone()]
+                    .iter()
+                    .zip(&self.u[pixels.clone()])
+                    .zip(&self.v[pixels]);
+                for (out, ((&y, &u), &v)) in out.chunks_exact_mut(4).zip(samples) {
+                    out.copy_from_slice(&yuv_to_rgba(y, u, v));
                 }
-                rgba.extend_from_slice(&yuv_to_rgba(self.y[at], u, v));
+                continue;
             }
+            self.even_row_to_rgba(line, left..right, out);
         }
         rgba
+    }
+
+    /// Converts `columns` of the even row starting at `line`, whose even-column chroma samples hold
+    /// a 2x2 block average that the reverse filter undoes.
+    fn even_row_to_rgba(&self, line: usize, columns: core::ops::Range<usize>, out: &mut [u8]) {
+        // The block's other three samples are inside the padded planes: `stride` and `rows` are
+        // even, and so is the row, so the row below exists and each even column has a right
+        // neighbor.
+        let below = line + self.stride;
+        let y = &self.y[line..below];
+        let (u, u_below) = (&self.u[line..below], &self.u[below..below + self.stride]);
+        let (v, v_below) = (&self.v[line..below], &self.v[below..below + self.stride]);
+        let filtered = |col: usize| {
+            (
+                reverse_filter(u[col], u[col + 1], u_below[col], u_below[col + 1]),
+                reverse_filter(v[col], v[col + 1], v_below[col], v_below[col + 1]),
+            )
+        };
+
+        let (mut col, end) = (columns.start, columns.end);
+        let mut out = out;
+        if col % 2 == 1 && col < end {
+            let (pixel, rest) = out.split_at_mut(4);
+            pixel.copy_from_slice(&yuv_to_rgba(y[col], u[col], v[col]));
+            out = rest;
+            col += 1;
+        }
+        let pairs = col..col + (end - col) / 2 * 2;
+        let (pair_out, tail) = out.split_at_mut(pairs.len() * 4);
+        let blocks = y[pairs.clone()]
+            .chunks_exact(2)
+            .zip(
+                u[pairs.clone()]
+                    .chunks_exact(2)
+                    .zip(u_below[pairs.clone()].chunks_exact(2)),
+            )
+            .zip(
+                v[pairs.clone()]
+                    .chunks_exact(2)
+                    .zip(v_below[pairs.clone()].chunks_exact(2)),
+            );
+        for (out, ((y, (u, u_below)), (v, v_below))) in pair_out.chunks_exact_mut(8).zip(blocks) {
+            let filtered_u = reverse_filter(u[0], u[1], u_below[0], u_below[1]);
+            let filtered_v = reverse_filter(v[0], v[1], v_below[0], v_below[1]);
+            out[..4].copy_from_slice(&yuv_to_rgba(y[0], filtered_u, filtered_v));
+            out[4..].copy_from_slice(&yuv_to_rgba(y[1], u[1], v[1]));
+        }
+        if let Some(pixel) = tail.get_mut(..4) {
+            let (u, v) = filtered(pairs.end);
+            pixel.copy_from_slice(&yuv_to_rgba(y[pairs.end], u, v));
+        }
     }
 
     /// Splits the picture into its main and auxiliary views.
@@ -435,15 +487,56 @@ fn average(a: u8, b: u8, c: u8, d: u8) -> u8 {
 ///
 /// [MS-RDPEGFX]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx/da5c75f9-cd99-450c-98c4-014a496942b0
 pub(crate) fn yuv_to_rgba(y: u8, u: u8, v: u8) -> [u8; 4] {
-    let luma = 256 * i32::from(y);
-    let u = i32::from(u) - 128;
-    let v = i32::from(v) - 128;
-    [
-        clamp_channel((luma + 403 * v) >> 8),
-        clamp_channel((luma - 48 * u - 120 * v) >> 8),
-        clamp_channel((luma + 475 * u) >> 8),
-        0xFF,
-    ]
+    Chroma::new(u, v).rgba(y)
+}
+
+/// Converts one row of a 4:2:0 picture, in which each chroma sample covers two pixels, into `out`.
+pub(crate) fn yuv420_row_to_rgba(y: &[u8], u: &[u8], v: &[u8], out: &mut [u8]) {
+    let mut out_pairs = out.chunks_exact_mut(8);
+    let mut y_pairs = y.chunks_exact(2);
+    let mut chroma = u.iter().zip(v).map(|(&u, &v)| Chroma::new(u, v));
+    for ((out, y), chroma) in (&mut out_pairs).zip(&mut y_pairs).zip(&mut chroma) {
+        out[..4].copy_from_slice(&chroma.rgba(y[0]));
+        out[4..].copy_from_slice(&chroma.rgba(y[1]));
+    }
+    // An odd width leaves one pixel with a chroma sample of its own.
+    if let (Some(out), Some(&y), Some(chroma)) = (
+        out_pairs.into_remainder().get_mut(..4),
+        y_pairs.remainder().first(),
+        chroma.next(),
+    ) {
+        out.copy_from_slice(&chroma.rgba(y));
+    }
+}
+
+/// The chroma terms of [`yuv_to_rgba`], computed once for every pixel that shares them.
+#[derive(Clone, Copy)]
+pub(crate) struct Chroma {
+    red: i32,
+    green: i32,
+    blue: i32,
+}
+
+impl Chroma {
+    pub(crate) fn new(u: u8, v: u8) -> Self {
+        let u = i32::from(u) - 128;
+        let v = i32::from(v) - 128;
+        Self {
+            red: 403 * v,
+            green: -48 * u - 120 * v,
+            blue: 475 * u,
+        }
+    }
+
+    pub(crate) fn rgba(self, y: u8) -> [u8; 4] {
+        let luma = 256 * i32::from(y);
+        [
+            clamp_channel((luma + self.red) >> 8),
+            clamp_channel((luma + self.green) >> 8),
+            clamp_channel((luma + self.blue) >> 8),
+            0xFF,
+        ]
+    }
 }
 
 /// Converts a pixel with the forward transform of [MS-RDPEGFX] 3.3.8.3.1 ("Color Conversion").
