@@ -20,6 +20,8 @@
 
 use core::fmt;
 
+use ironrdp_pdu::geometry::ExclusiveRectangle;
+
 // ============================================================================
 // Decoded Frame
 // ============================================================================
@@ -204,6 +206,37 @@ impl Yuv420Frame {
         }
         rgba.truncate(converted * row_bytes);
         DecodedFrame::new(rgba, u32::from(self.width), u32::from(self.height))
+    }
+
+    /// Converts the pixels of `rect`, clipped to the picture, like [`Self::to_rgba`], into a
+    /// tightly packed RGBA buffer.
+    pub(crate) fn region_to_rgba(&self, rect: &ExclusiveRectangle) -> Vec<u8> {
+        let right = usize::from(rect.right.min(self.width));
+        let bottom = usize::from(rect.bottom.min(self.height));
+        let (left, top) = (usize::from(rect.left), usize::from(rect.top));
+        if !(left < right && top < bottom) {
+            return Vec::new();
+        }
+        let row_bytes = (right - left) * 4;
+        let mut rgba = vec![0; row_bytes * (bottom - top)];
+        let mut converted = 0;
+        for (row, out) in (top..bottom).zip(rgba.chunks_exact_mut(row_bytes)) {
+            let (Some(y), Some(u), Some(v)) = (self.luma_row(row), self.u_row(row / 2), self.v_row(row / 2)) else {
+                break;
+            };
+            // An odd left edge starts on the second pixel of a chroma sample.
+            let (out, start) = if left % 2 == 1 {
+                let (first, others) = out.split_at_mut(4);
+                first.copy_from_slice(&crate::avc444::Chroma::new(u[left / 2], v[left / 2]).rgba(y[left]));
+                (others, left + 1)
+            } else {
+                (out, left)
+            };
+            crate::avc444::yuv420_row_to_rgba(&y[start..right], &u[start / 2..], &v[start / 2..], out);
+            converted += 1;
+        }
+        rgba.truncate(converted * row_bytes);
+        rgba
     }
 }
 
