@@ -1499,8 +1499,8 @@ impl GraphicsPipelineClient {
             .decode(bitmap_data, dest_width, dest_height)
             .map_err(|e| pdu_other_err!("ClearCodec decode", source: e))?;
 
-        // ClearCodec outputs BGRA; convert to RGBA for the uniform BitmapUpdate format
-        let rgba = convert_bgra_to_rgba(&bgra);
+        // ClearCodec outputs BGRA; reorder it in place to RGBA for the uniform BitmapUpdate format
+        let rgba = convert_bgra_to_rgba(bgra);
 
         let update = BitmapUpdate {
             surface_id,
@@ -1931,7 +1931,7 @@ impl GraphicsPipelineClient {
         // BitmapUpdate.data is always RGBA8888 regardless of codec -- this is
         // the convention so that handlers get a uniform pixel format.
         // Uncompressed wire format is 32-bit LE (0xAARRGGBB → bytes [B, G, R, A]).
-        let rgba_data = convert_uncompressed_to_rgba(&pdu.bitmap_data);
+        let rgba_data = convert_uncompressed_to_rgba(pdu.bitmap_data);
 
         let update = BitmapUpdate {
             surface_id: pdu.surface_id,
@@ -2067,20 +2067,23 @@ fn bitmap_cache_limits(caps: &CodecCapabilities) -> (u16, usize) {
 /// taken from the stream.
 fn convert_rgb24_to_rgba(src: &[u8]) -> Vec<u8> {
     debug_assert!(src.len().is_multiple_of(3), "RGB24 input length not aligned to 3 bytes");
-    let mut dst = Vec::with_capacity(src.len() / 3 * 4);
-    for pixel in src.chunks_exact(3) {
-        dst.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 0xFF]);
+    let mut dst = vec![0; src.len() / 3 * 4];
+    for (dst, src) in dst.chunks_exact_mut(4).zip(src.chunks_exact(3)) {
+        dst.copy_from_slice(&[src[0], src[1], src[2], 0xFF]);
     }
     dst
 }
 
-fn convert_bgra_to_rgba(src: &[u8]) -> Vec<u8> {
-    debug_assert!(src.len().is_multiple_of(4), "BGRA input length not aligned to 4 bytes");
-    let mut dst = Vec::with_capacity(src.len());
-    for pixel in src.chunks_exact(4) {
-        dst.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+fn convert_bgra_to_rgba(mut pixels: Vec<u8>) -> Vec<u8> {
+    debug_assert!(
+        pixels.len().is_multiple_of(4),
+        "BGRA input length not aligned to 4 bytes"
+    );
+    pixels.truncate(pixels.len() / 4 * 4);
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
     }
-    dst
+    pixels
 }
 
 /// Convert uncompressed 32bpp little-endian pixels to RGBA8888
@@ -2088,15 +2091,13 @@ fn convert_bgra_to_rgba(src: &[u8]) -> Vec<u8> {
 /// The wire format for uncompressed graphics is 0xAARRGGBB in a 32-bit
 /// little-endian word, which corresponds to bytes [B, G, R, A]. This
 /// reorders to [R, G, B, 0xFF], treating all pixels as fully opaque.
-fn convert_uncompressed_to_rgba(src: &[u8]) -> Vec<u8> {
-    let mut dst = Vec::with_capacity(src.len());
-    for pixel in src.chunks_exact(4) {
-        let b = pixel[0];
-        let g = pixel[1];
-        let r = pixel[2];
-        dst.extend_from_slice(&[r, g, b, 0xFF]);
+fn convert_uncompressed_to_rgba(mut pixels: Vec<u8>) -> Vec<u8> {
+    pixels.truncate(pixels.len() / 4 * 4);
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+        pixel[3] = 0xFF;
     }
-    dst
+    pixels
 }
 
 /// Crop a decoded RGBA frame to target dimensions
@@ -2651,7 +2652,7 @@ mod tests {
             0xFF, 0x00, 0x00, 0xCC, // B=255, G=0, R=0, A=204 (blue)
             0x00, 0xFF, 0x00, 0x80, // B=0, G=255, R=0, A=128 (green)
         ];
-        let rgba = convert_bgra_to_rgba(&bgra);
+        let rgba = convert_bgra_to_rgba(bgra);
         // Expected: [R, G, B, A] per pixel
         assert_eq!(
             rgba,
@@ -2669,7 +2670,7 @@ mod tests {
             0x00, 0x80, 0xFF, 0xCC, // B=0, G=128, R=255, A=204
             0x10, 0x20, 0x30, 0x40, // B=16, G=32, R=48, A=64
         ];
-        let rgba = convert_uncompressed_to_rgba(&wire_pixels);
+        let rgba = convert_uncompressed_to_rgba(wire_pixels);
         // Expected: [R, G, B, 0xFF] per pixel (alpha forced to opaque)
         assert_eq!(rgba, vec![0xFF, 0x80, 0x00, 0xFF, 0x30, 0x20, 0x10, 0xFF]);
     }
