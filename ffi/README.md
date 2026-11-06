@@ -38,6 +38,13 @@ The native library needs the `rdpsnd-native` feature, on by default; on Linux, b
 Without the feature, `WithStaticChannelRdpSndNative` throws `IronRdpException` with the `WrongOS` kind.
 Opus is not offered, so the server sends PCM, ADPCM or G.711, or AAC to a Windows client.
 
+### Recording and muting
+
+`connector.WithStaticChannelRdpSndNativeTapped(tap)` plays the audio as `WithStaticChannelRdpSndNative()` does and also hands a copy of each decoded wave block to an `AudioTap`, which the static channel and both dynamic channels share.
+`tap.SetEnabled(true)` starts queuing, at most ten seconds, dropping the oldest when `Pop()` does not keep up (`Dropped` counts them); each `AudioChunk` is interleaved 16-bit little-endian PCM with its `SampleRate`, `Channels` and `AgeMicros`.
+`tap.SetMuted(true)` plays silence on the device while the tap still queues the decoded audio, and `SoundAgeMicros` tells how long ago the connection last played audible sound.
+`AudioOutput.Open(sampleRate, channels)` plays 16-bit PCM written with `Write` on the default output device, for playing a recording back.
+
 ## Touch and pen input (MS-RDPEI)
 
 - Attach the channel before connecting: `connector.WithDynamicChannelRdpei(maxTouchContacts, showTouchVisuals)`.

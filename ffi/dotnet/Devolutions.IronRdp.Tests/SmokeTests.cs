@@ -441,6 +441,24 @@ internal static class SmokeTests
             True(connector.StepNoInput(buf).Size.IsSome(), "the connector still starts the connection");
         });
 
+        // oracle: ffi/README.md "Recording and muting"
+        yield return ("an audio tap attaches with native playback and starts empty", () =>
+        {
+            var tap = AudioTap.New();
+            tap.SetEnabled(true);
+            True(tap.Pop() is null, "nothing queued before the session plays");
+            Equal(0ul, tap.Dropped, "nothing dropped");
+            Equal(ulong.MaxValue, tap.SoundAgeMicros, "no sound played yet");
+            True(!tap.IsMuted(), "playback starts unmuted");
+            tap.SetMuted(true);
+            True(tap.IsMuted(), "muted");
+
+            var connector = ClientConnector.New(TlsConfig(), "127.0.0.1:33890");
+            connector.WithStaticChannelRdpSndNativeTapped(tap);
+            var buf = WriteBuf.New();
+            True(connector.StepNoInput(buf).Size.IsSome(), "the connector still starts the connection");
+        });
+
         yield return ("connector sends an X.224 request and accepts the confirm", () =>
         {
             var config = TlsConfig();
