@@ -241,6 +241,23 @@ impl LocalFiles {
         self.locked.remove(&clip_data_id);
     }
 
+    pub(crate) fn is_locked(&self, clip_data_id: u32) -> bool {
+        self.locked.contains_key(&clip_data_id)
+    }
+
+    /// The size of the file `request` is for, when known.
+    pub(crate) fn file_size(&self, request: &FileContentsRequest) -> Option<u64> {
+        let source = request
+            .data_id
+            .and_then(|data_id| self.locked.get(&data_id))
+            .or(self.current.as_ref())?;
+        let index = usize::try_from(request.index).ok()?;
+        match source.as_ref() {
+            LocalFileSource::Paths(entries) => entries.get(index)?.descriptor.file_size,
+            LocalFileSource::Virtual(virtual_files) => virtual_files.files.get(index)?.0.file_size,
+        }
+    }
+
     pub(crate) fn file_contents(&self, request: &FileContentsRequest) -> FileContentsResponse<'static> {
         // Without a snapshot for its `clipDataId`, `Cliprdr` validated the request against the
         // current list, so it is served from there as well.

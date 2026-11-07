@@ -15,6 +15,7 @@ mod os_clipboard;
 mod remote_format_registry;
 mod shared;
 mod transport;
+mod upload_watch;
 mod utils;
 
 use std::rc::Rc;
@@ -52,6 +53,9 @@ const WM_CLIPRDR_RELEASE: u32 = WM_USER + 1;
 
 pub type WinCliprdrResult<T> = Result<T, WinCliprdrError>;
 
+/// How the message of [`WinCliprdrError::RemoteStoppedReading`] starts, for embedders to recognize it.
+pub(crate) const REMOTE_STOPPED_READING: &str = "the remote stopped reading the files copied from here";
+
 #[derive(Debug)]
 pub enum WinCliprdrError {
     AddClipboardFormatListener,
@@ -66,6 +70,9 @@ pub enum WinCliprdrError {
     Alloc,
     DataReceiveTimeout,
     RenderFormat,
+    /// The remote stopped reading files copied from here when something was copied on it: Windows
+    /// servers abandon such a paste. The message starts with [`REMOTE_STOPPED_READING`].
+    RemoteStoppedReading,
     WinAPI(Error),
 }
 
@@ -86,6 +93,10 @@ impl core::fmt::Display for WinCliprdrError {
             WinCliprdrError::Alloc => write!(f, "failed to allocate global memory"),
             WinCliprdrError::DataReceiveTimeout => write!(f, "failed to receive data from remote clipboard"),
             WinCliprdrError::RenderFormat => write!(f, "failed to render clipboard format"),
+            WinCliprdrError::RemoteStoppedReading => write!(
+                f,
+                "{REMOTE_STOPPED_READING}: something was copied there while it was pasting them"
+            ),
             WinCliprdrError::WinAPI(_error) => write!(f, "WinAPI error"),
         }
     }
@@ -106,6 +117,7 @@ impl core::error::Error for WinCliprdrError {
             WinCliprdrError::Alloc => None,
             WinCliprdrError::DataReceiveTimeout => None,
             WinCliprdrError::RenderFormat => None,
+            WinCliprdrError::RemoteStoppedReading => None,
             WinCliprdrError::WinAPI(error) => Some(error),
         }
     }

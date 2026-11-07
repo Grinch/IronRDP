@@ -36,6 +36,7 @@ use crate::windows::os_clipboard::OwnedOsClipboard;
 use crate::windows::remote_format_registry::{RemoteClipboardFormatRegistry, register_format_name};
 use crate::windows::shared::ClipboardShared;
 use crate::windows::transport::RemoteTransport;
+use crate::windows::upload_watch::UploadWatch;
 use crate::windows::utils::render_format;
 use crate::windows::{BackendEvent, WM_CLIPRDR_BACKEND_EVENT, WM_CLIPRDR_RELEASE, WinCliprdrError, WinCliprdrResult};
 
@@ -43,6 +44,9 @@ const IDT_CLIPBOARD_RETRY: usize = 1;
 /// Checks whether a local clipboard change held back for a download can go out yet.
 const IDT_CLIPBOARD_HELD: usize = 2;
 const HELD_UPDATE_CHECK_MS: u32 = 500;
+/// Checks whether the remote gave up on files it was reading from here.
+const IDT_UPLOAD_CHECK: usize = 3;
+const UPLOAD_CHECK_MS: u32 = 1_000;
 
 /// Files found on the local clipboard, before they are turned into a [`LocalFileSource`].
 enum LocalClipboardFiles {
@@ -76,6 +80,8 @@ pub(crate) struct WinClipboardImpl {
     mta_usage: Option<CO_MTA_USAGE_COOKIE>,
     /// A local clipboard change is waiting for a download from the remote to finish.
     held_update: bool,
+    upload_watch: UploadWatch,
+    upload_check_running: bool,
 }
 
 impl WinClipboardImpl {
@@ -116,6 +122,8 @@ impl WinClipboardImpl {
             remote_data_object: None,
             mta_usage,
             held_update: false,
+            upload_watch: UploadWatch::default(),
+            upload_check_running: false,
         }
     }
 
@@ -506,8 +514,42 @@ impl WinClipboardImpl {
         self.handle_event(BackendEvent::ClipboardUpdated);
     }
 
+    /// Runs the check timer while the remote may have given up on files from here.
+    fn update_upload_check(&mut self) {
+        let watching = self.upload_watch.watching();
+        if watching == self.upload_check_running {
+            return;
+        }
+
+        self.upload_check_running = watching;
+        if watching {
+            // SAFETY: `SetTimer` is always safe to call when `hwnd` is a valid window handle.
+            unsafe { SetTimer(Some(self.window), IDT_UPLOAD_CHECK, UPLOAD_CHECK_MS, None) };
+        } else {
+            // SAFETY: `KillTimer` is always safe to call when `hwnd` is a valid window handle.
+            if let Err(error) = unsafe { KillTimer(Some(self.window), IDT_UPLOAD_CHECK) } {
+                debug!(%error, "Failed to stop the upload check timer");
+            }
+        }
+    }
+
+    fn handle_upload_check(&mut self) {
+        let local_files = &self.local_files;
+        if self.upload_watch.check(crate::native_now_ms(), |clip_data_id| {
+            local_files.is_locked(clip_data_id)
+        }) {
+            warn!("The remote stopped reading the files copied from here after something was copied there");
+            self.transport
+                .send(ClipboardMessage::Error(Box::new(WinCliprdrError::RemoteStoppedReading)));
+        }
+
+        self.update_upload_check();
+    }
+
     fn on_session_started(&mut self) {
         self.stop_holding_update();
+        self.upload_watch.clear();
+        self.update_upload_check();
         self.channel_ready = false;
         self.transport.start_session();
         self.local_files.clear();
@@ -543,6 +585,8 @@ impl WinClipboardImpl {
     /// of the COM objects held, before OLE is uninitialized.
     fn shutdown(&mut self) {
         self.stop_holding_update();
+        self.upload_watch.clear();
+        self.update_upload_check();
         self.local_files.clear();
         self.remove_remote_data_object();
         // Applications may still hold the data object or its streams.
@@ -589,7 +633,11 @@ impl WinClipboardImpl {
                 self.transport.drop_late_answer();
                 Ok(None)
             }
-            BackendEvent::RemoteFormatList(formats, generation) => self.on_remote_format_list(formats, *generation),
+            BackendEvent::RemoteFormatList(formats, generation) => {
+                self.upload_watch.on_remote_format_list(crate::native_now_ms());
+                self.update_upload_check();
+                self.on_remote_format_list(formats, *generation)
+            }
 
             BackendEvent::ClipboardUpdated if self.transport.shared().downloading() => {
                 self.hold_update();
@@ -612,9 +660,14 @@ impl WinClipboardImpl {
             }
             BackendEvent::Ready => self.on_ready(),
 
-            BackendEvent::FileContentsRequest(request) => Ok(Some(ClipboardMessage::SendFileContentsResponse(
-                self.local_files.file_contents(request),
-            ))),
+            BackendEvent::FileContentsRequest(request) => {
+                let size = self.local_files.file_size(request);
+                self.upload_watch.on_request(request, size, crate::native_now_ms());
+                self.update_upload_check();
+                Ok(Some(ClipboardMessage::SendFileContentsResponse(
+                    self.local_files.file_contents(request),
+                )))
+            }
             BackendEvent::FormatListResponse(accepted) => {
                 self.local_files.acknowledge(*accepted);
                 Ok(None)
@@ -624,6 +677,8 @@ impl WinClipboardImpl {
                 Ok(None)
             }
             BackendEvent::Unlock(data_id) => {
+                self.upload_watch.on_unlock(data_id.0);
+                self.update_upload_check();
                 self.local_files.unlock(data_id.0);
                 Ok(None)
             }
@@ -984,6 +1039,10 @@ pub(crate) unsafe extern "system" fn clipboard_subproc(
         // Retry timer. Some operations clipboard operations such as `OpenClipboard` are
         // fallible. We need to retry them a few times before giving up.
         // Repeats until the held change goes out; one missed while busy comes round again.
+        WM_TIMER if wparam.0 == IDT_UPLOAD_CHECK => {
+            let _ = state.with_impl(|ctx, _| ctx.handle_upload_check());
+            LRESULT(0)
+        }
         WM_TIMER if wparam.0 == IDT_CLIPBOARD_HELD => {
             let _ = state.with_impl(|ctx, _| ctx.handle_held_timer());
             LRESULT(0)
