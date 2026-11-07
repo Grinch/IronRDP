@@ -27,7 +27,13 @@ pub(crate) struct ClipboardShared {
     next_stream_id: AtomicU32,
     /// Streams waiting for a file contents response, by stream id.
     waiters: Mutex<HashMap<u32, mpsc::Sender<FileContentsResponse<'static>>>>,
+    /// When the last file contents request went out, in [`crate::native_now_ms`] time; 0 before any.
+    last_file_request_ms: AtomicU64,
 }
+
+/// A download from the remote counts as running until it has sent nothing for this long. Readers
+/// such as Explorer pause briefly between files and between reads.
+pub(crate) const DOWNLOAD_IDLE_MS: u64 = 2_000;
 
 impl ClipboardShared {
     pub(crate) fn new(message_proxy: Box<dyn ClipboardMessageProxy>) -> Self {
@@ -39,6 +45,7 @@ impl ClipboardShared {
             released_locks: Mutex::new(HashSet::new()),
             next_stream_id: AtomicU32::new(1),
             waiters: Mutex::new(HashMap::new()),
+            last_file_request_ms: AtomicU64::new(0),
         }
     }
 
@@ -78,6 +85,25 @@ impl ClipboardShared {
         self.lock_released_locks().clear();
         // The previous channel answers nothing more: its waiters fail at once.
         self.lock_waiters().clear();
+        self.last_file_request_ms.store(0, Ordering::Release);
+    }
+
+    /// Whether files are being read from the remote: a request is unanswered, or one went out
+    /// within [`DOWNLOAD_IDLE_MS`].
+    ///
+    /// Windows' `rdpclip` stops serving a download, lock or no lock, once the client announces a
+    /// new clipboard, so a local copy is held back while this is true.
+    pub(crate) fn downloading(&self) -> bool {
+        self.downloading_at(crate::native_now_ms())
+    }
+
+    fn downloading_at(&self, now_ms: u64) -> bool {
+        if !self.lock_waiters().is_empty() {
+            return true;
+        }
+
+        let last = self.last_file_request_ms.load(Ordering::Acquire);
+        last != 0 && now_ms.saturating_sub(last) < DOWNLOAD_IDLE_MS
     }
 
     /// Invalidates everything handed out, for good: the clipboard is going away, and streams or
@@ -113,6 +139,8 @@ impl ClipboardShared {
 
         let (sender, receiver) = mpsc::channel();
         self.lock_waiters().insert(stream_id, sender);
+        self.last_file_request_ms
+            .store(crate::native_now_ms().max(1), Ordering::Release);
 
         self.send(ClipboardMessage::SendFileContentsRequest(request));
 
@@ -137,5 +165,58 @@ impl ClipboardShared {
 
     fn lock_waiters(&self) -> std::sync::MutexGuard<'_, HashMap<u32, mpsc::Sender<FileContentsResponse<'static>>>> {
         self.waiters.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ironrdp_cliprdr::pdu::FileContentsFlags;
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct NoProxy;
+
+    impl ClipboardMessageProxy for NoProxy {
+        fn send_clipboard_message(&self, _message: ClipboardMessage) {}
+    }
+
+    fn request() -> FileContentsRequest {
+        FileContentsRequest {
+            stream_id: 0,
+            index: 0,
+            flags: FileContentsFlags::RANGE,
+            position: 0,
+            requested_size: 1024,
+            data_id: Some(1),
+        }
+    }
+
+    #[test]
+    fn a_download_runs_while_a_request_is_unanswered_and_shortly_after() {
+        let shared = ClipboardShared::new(Box::new(NoProxy));
+        assert!(!shared.downloading());
+
+        let receiver = shared.request_file_contents(request());
+        assert!(shared.downloading());
+
+        shared.deliver(FileContentsResponse::new_data_response(1, vec![0; 4]));
+        assert!(receiver.recv().is_ok());
+        // Answered, but the reader is about to ask for the next chunk.
+        assert!(shared.downloading());
+
+        let sent = shared.last_file_request_ms.load(Ordering::Acquire);
+        assert!(shared.downloading_at(sent + DOWNLOAD_IDLE_MS - 1));
+        assert!(!shared.downloading_at(sent + DOWNLOAD_IDLE_MS));
+    }
+
+    #[test]
+    fn a_new_session_ends_a_download() {
+        let shared = ClipboardShared::new(Box::new(NoProxy));
+        let _receiver = shared.request_file_contents(request());
+
+        shared.start_session();
+
+        assert!(!shared.downloading());
     }
 }

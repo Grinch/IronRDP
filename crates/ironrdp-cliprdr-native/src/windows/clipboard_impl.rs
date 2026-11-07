@@ -40,6 +40,9 @@ use crate::windows::utils::render_format;
 use crate::windows::{BackendEvent, WM_CLIPRDR_BACKEND_EVENT, WM_CLIPRDR_RELEASE, WinCliprdrError, WinCliprdrResult};
 
 const IDT_CLIPBOARD_RETRY: usize = 1;
+/// Checks whether a local clipboard change held back for a download can go out yet.
+const IDT_CLIPBOARD_HELD: usize = 2;
+const HELD_UPDATE_CHECK_MS: u32 = 500;
 
 /// Files found on the local clipboard, before they are turned into a [`LocalFileSource`].
 enum LocalClipboardFiles {
@@ -71,6 +74,8 @@ pub(crate) struct WinClipboardImpl {
     remote_data_object: Option<IDataObject>,
     /// Keeps the multithreaded apartment, where remote file streams live, while OLE is in use.
     mta_usage: Option<CO_MTA_USAGE_COOKIE>,
+    /// A local clipboard change is waiting for a download from the remote to finish.
+    held_update: bool,
 }
 
 impl WinClipboardImpl {
@@ -110,6 +115,7 @@ impl WinClipboardImpl {
             local_files: LocalFiles::default(),
             remote_data_object: None,
             mta_usage,
+            held_update: false,
         }
     }
 
@@ -459,7 +465,49 @@ impl WinClipboardImpl {
         Ok(None)
     }
 
+    /// Puts off announcing a local copy while files are read from the remote: Windows servers fail
+    /// the rest of the download once the client takes the clipboard. The latest local clipboard
+    /// goes out when the download is done, unless the remote's has replaced it meanwhile.
+    fn hold_update(&mut self) {
+        if self.held_update {
+            return;
+        }
+
+        debug!("Holding a local clipboard change back until the download from the remote is done");
+        self.held_update = true;
+        // SAFETY: `SetTimer` is always safe to call when `hwnd` is a valid window handle.
+        unsafe { SetTimer(Some(self.window), IDT_CLIPBOARD_HELD, HELD_UPDATE_CHECK_MS, None) };
+    }
+
+    fn stop_holding_update(&mut self) {
+        if !self.held_update {
+            return;
+        }
+
+        self.held_update = false;
+        // SAFETY: `KillTimer` is always safe to call when `hwnd` is a valid window handle.
+        if let Err(error) = unsafe { KillTimer(Some(self.window), IDT_CLIPBOARD_HELD) } {
+            debug!(%error, "Failed to stop the held clipboard change timer");
+        }
+    }
+
+    fn handle_held_timer(&mut self) {
+        if !self.held_update || self.transport.shared().downloading() {
+            return;
+        }
+
+        self.stop_holding_update();
+        if self.owns_clipboard() {
+            debug!("Dropping a held local clipboard change: the remote's clipboard replaced it");
+            return;
+        }
+
+        debug!("Sending the local clipboard change held back for a download");
+        self.handle_event(BackendEvent::ClipboardUpdated);
+    }
+
     fn on_session_started(&mut self) {
+        self.stop_holding_update();
         self.channel_ready = false;
         self.transport.start_session();
         self.local_files.clear();
@@ -494,6 +542,7 @@ impl WinClipboardImpl {
     /// Takes the remote data object off the clipboard, as it can't be served anymore, and lets go
     /// of the COM objects held, before OLE is uninitialized.
     fn shutdown(&mut self) {
+        self.stop_holding_update();
         self.local_files.clear();
         self.remove_remote_data_object();
         // Applications may still hold the data object or its streams.
@@ -542,7 +591,14 @@ impl WinClipboardImpl {
             }
             BackendEvent::RemoteFormatList(formats, generation) => self.on_remote_format_list(formats, *generation),
 
-            BackendEvent::ClipboardUpdated | BackendEvent::RemoteRequestsFormatList => self.on_clipboard_update(),
+            BackendEvent::ClipboardUpdated if self.transport.shared().downloading() => {
+                self.hold_update();
+                Ok(None)
+            }
+            BackendEvent::ClipboardUpdated | BackendEvent::RemoteRequestsFormatList => {
+                self.stop_holding_update();
+                self.on_clipboard_update()
+            }
             BackendEvent::RenderFormat(format) => self.on_render_format(*format),
             BackendEvent::RenderAllFormats => self.on_render_all_formats(),
 
@@ -927,6 +983,11 @@ pub(crate) unsafe extern "system" fn clipboard_subproc(
         }
         // Retry timer. Some operations clipboard operations such as `OpenClipboard` are
         // fallible. We need to retry them a few times before giving up.
+        // Repeats until the held change goes out; one missed while busy comes round again.
+        WM_TIMER if wparam.0 == IDT_CLIPBOARD_HELD => {
+            let _ = state.with_impl(|ctx, _| ctx.handle_held_timer());
+            LRESULT(0)
+        }
         WM_TIMER if wparam.0 == IDT_CLIPBOARD_RETRY => {
             if state.with_impl(|ctx, _| ctx.handle_retry_timer()).is_none() {
                 state.missed_retry_timer.set(true);
